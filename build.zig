@@ -9,6 +9,7 @@ pub fn build(b: *std.build.Builder) void {
     lib.install();
 
     var main_tests = b.addTest("src/main.zig");
+    main_tests.addPackage(fastfilter.pkg);
     main_tests.setBuildMode(mode);
 
     const test_step = b.step("test", "Run library tests");
@@ -18,6 +19,7 @@ pub fn build(b: *std.build.Builder) void {
 pub const pkg = std.build.Pkg{
     .name = "sinter",
     .path = .{ .path = thisDir() ++ "/src/main.zig" },
+    .dependencies = &.{fastfilter.pkg},
 };
 
 fn thisDir() []const u8 {
