@@ -8,6 +8,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v2
+        with:
+          submodules: true
+          fetch-depth: 0
       - name: Setup Zig
         run: |
           sudo apt install xz-utils
