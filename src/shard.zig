@@ -3,6 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
+/// Comptime options for a shard.
 const Options = struct {
     /// The binary fuse filter bit size. Either 8, 16, or 32. A higher bit size like 16 could be
     /// useful if false positive matches have a very high penalty for your use case (bitsize of 8
@@ -14,9 +15,10 @@ const Options = struct {
     layer1_divisions: usize = 8,
 };
 
-/// A filter shard is the smallest logical representation of a sinter filter. They are designed to
-/// be relatively even in the amount of data they represent, live on a single physical machine, and
-/// be operated on within a single CPU core.
+/// A shard is the smallest logical representation of a sinter filter. They are designed to be
+/// relatively even in the amount of data they represent, live on a single physical machine, and be
+/// operated on within a single CPU core. Multiple shards are typically used to distribute across
+/// multiple cores and machines.
 ///
 /// A shard contains keys (e.g. trigram strings to match) and results (e.g. the files those
 /// trigrams came from.) It's advised that you keep shards at around ~100,000,000 keys in total.
