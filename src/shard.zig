@@ -253,22 +253,91 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             return shard.layer0.?.contain(key);
         }
 
-        /// Queries for results from the shard that likely contain the specified key (within the
-        /// set false-positive rate.)
+        /// Queries for results from the shard, returning results for entries that likely match one
+        /// of the keys in `or_keys`.
         ///
         /// Returns the number of results found.
-        pub inline fn query(shard: *Self, allocator: Allocator, key: u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
-            if (!shard.layer0.?.contain(key)) {
-                return 0;
-            }
+        pub inline fn queryLogicalOr(shard: *Self, allocator: Allocator, or_keys: []const u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
+            var any = blk: {
+                for (or_keys) |key| {
+                    if (shard.layer0.?.contain(key)) {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            };
+            if (!any) return 0;
+
             var results: usize = 0;
             for (shard.layer1) |*layer2| {
                 var layer1 = layer2.filter.?;
-                if (!layer1.contain(key)) {
-                    continue;
-                }
+                any = blk: {
+                    for (or_keys) |key| {
+                        if (layer1.contain(key)) {
+                            break :blk true;
+                        }
+                    }
+                    break :blk false;
+                };
+                if (!any) continue;
+
                 for (layer2.entries.items(.filter)) |entry_filter, i| {
-                    if (!entry_filter.?.contain(key)) continue;
+                    any = blk: {
+                        for (or_keys) |key| {
+                            if (entry_filter.?.contain(key)) {
+                                break :blk true;
+                            }
+                        }
+                        break :blk false;
+                    };
+                    if (!any) continue;
+
+                    results += 1;
+                    if (dst) |d| try d.append(allocator, layer2.entries.get(i).result);
+                }
+            }
+            return results;
+        }
+
+        /// Queries for results from the shard, returning results for entries that likely match all
+        /// of the keys in `and_keys`.
+        ///
+        /// Returns the number of results found.
+        pub inline fn queryLogicalAnd(shard: *Self, allocator: Allocator, and_keys: []const u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
+            var all = blk: {
+                for (and_keys) |key| {
+                    if (!shard.layer0.?.contain(key)) {
+                        break :blk false;
+                    }
+                }
+                break :blk true;
+            };
+            if (!all) return 0;
+
+            var results: usize = 0;
+            for (shard.layer1) |*layer2| {
+                var layer1 = layer2.filter.?;
+                all = blk: {
+                    for (and_keys) |key| {
+                        if (!layer1.contain(key)) {
+                            break :blk false;
+                        }
+                    }
+                    break :blk true;
+                };
+                if (!all) continue;
+
+                for (layer2.entries.items(.filter)) |entry_filter, i| {
+                    all = blk: {
+                        for (and_keys) |key| {
+                            if (!entry_filter.?.contain(key)) {
+                                break :blk false;
+                            }
+                        }
+                        break :blk true;
+                    };
+                    if (!all) continue;
+
                     results += 1;
                     if (dst) |d| try d.append(allocator, layer2.entries.get(i).result);
                 }
@@ -297,18 +366,19 @@ test "shard" {
     const Iterator = fastfilter.SliceIterator(u64);
     const TestShard = Shard(.{}, []const u8, *Iterator);
 
-    // For testing sake, we estimate only 8,000 keys and 100 per entry.
-    const estimated_keys = 8_000;
+    const estimated_keys = 100;
     var shard = TestShard.init(estimated_keys);
     defer shard.deinit(allocator);
 
-    // Insert a file.
+    // Insert files.
     var keys_iter = Iterator.init(&.{ 1, 2, 3, 4 });
-    try shard.insert(allocator, &keys_iter, "Hello world! 1-2-3-4");
+    try shard.insert(allocator, &keys_iter, "1-2-3-4");
 
-    // Insert a file.
     var keys_iter_2 = Iterator.init(&.{ 3, 4, 5 });
-    try shard.insert(allocator, &keys_iter_2, "Hello world! 3-4-5");
+    try shard.insert(allocator, &keys_iter_2, "3-4-5");
+
+    var keys_iter_3 = Iterator.init(&.{ 6, 7, 8 });
+    try shard.insert(allocator, &keys_iter_3, "6-7-8");
 
     // Index.
     try shard.index(allocator);
@@ -318,12 +388,33 @@ test "shard" {
     try testing.expectEqual(true, shard.contains(4));
 
     // Fast queries.
-    // TODO: make these AND/OR list inputs of query keys for improved perf in that case.
     var results = std.ArrayListUnmanaged([]const u8){};
     defer results.deinit(allocator);
-    _ = try shard.query(allocator, 5, *std.ArrayListUnmanaged([]const u8), &results);
-    try testing.expectEqual(@as(usize, 1), results.items.len);
-    try testing.expectEqualStrings("Hello world! 3-4-5", results.items[0]);
 
-    _ = shard.sizeInBytes();
+    // Query a single key (5).
+    results.clearRetainingCapacity();
+    _ = try shard.queryLogicalOr(allocator, &.{5}, *std.ArrayListUnmanaged([]const u8), &results);
+    try testing.expectEqual(@as(usize, 1), results.items.len);
+    try testing.expectEqualStrings("3-4-5", results.items[0]);
+
+    // Query logical OR (2, 5)
+    results.clearRetainingCapacity();
+    _ = try shard.queryLogicalOr(allocator, &.{ 2, 5 }, *std.ArrayListUnmanaged([]const u8), &results);
+    try testing.expectEqual(@as(usize, 2), results.items.len);
+    try testing.expectEqualStrings("1-2-3-4", results.items[0]);
+    try testing.expectEqualStrings("3-4-5", results.items[1]);
+
+    // Query logical AND (2, 5)
+    results.clearRetainingCapacity();
+    _ = try shard.queryLogicalAnd(allocator, &.{ 2, 5 }, *std.ArrayListUnmanaged([]const u8), &results);
+    try testing.expectEqual(@as(usize, 0), results.items.len);
+
+    // Query logical AND (3, 4)
+    results.clearRetainingCapacity();
+    _ = try shard.queryLogicalAnd(allocator, &.{ 3, 4 }, *std.ArrayListUnmanaged([]const u8), &results);
+    try testing.expectEqual(@as(usize, 2), results.items.len);
+    try testing.expectEqualStrings("1-2-3-4", results.items[0]);
+    try testing.expectEqualStrings("3-4-5", results.items[1]);
+
+    try testing.expectEqual(@as(usize, 1676), shard.sizeInBytes());
 }
