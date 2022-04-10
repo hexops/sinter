@@ -59,13 +59,13 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
         keys: usize = 0,
 
         /// null until .index() is invoked.
-        layer0: ?BinaryFuseFilter.Data = null,
+        layer0: ?BinaryFuseFilter = null,
 
         layer1: [options.layer1_divisions]Layer2,
 
         pub const Layer2 = struct {
             /// null until .index() is invoked.
-            filter: ?BinaryFuseFilter.Data = null,
+            filter: ?BinaryFuseFilter = null,
 
             /// Total number of keys within this layer.
             keys: usize = 0,
@@ -77,7 +77,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             keys: usize = 0,
 
             /// null until .index() is invoked.
-            filter: ?BinaryFuseFilter.Data = null,
+            filter: ?BinaryFuseFilter = null,
             keys_iter: Iterator,
             result: Result,
         };
@@ -110,7 +110,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
         /// keys iterator.
         ///
         /// For example, if using text files + trigrams, result could be the file name and keys
-        /// would be an iterator for hashes of the files trigrams. See fastfilter.sliceIterator
+        /// would be an iterator for hashes of the files trigrams. See fastfilter.SliceIterator
         ///
         /// The iterator must remain alive at least until .index() is called.
         pub fn insert(shard: *Self, allocator: Allocator, keys_iter: Iterator, result: Result) !void {
@@ -212,16 +212,14 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
         pub fn index(shard: *Self, allocator: Allocator) !void {
             // Populate layer0 with all keys.
             var all_keys_iter = AllKeysIter{ .shard = shard };
-            var layer0 = try BinaryFuseFilter.init(allocator, shard.keys);
-            try layer0.populateIter(allocator, &all_keys_iter);
-            shard.layer0 = layer0.data;
+            shard.layer0 = try BinaryFuseFilter.init(allocator, shard.keys);
+            try shard.layer0.?.populateIter(allocator, &all_keys_iter);
 
             // Populate each layer2 filter, with their division of keys.
             for (shard.layer1) |*layer2, layer2_index| {
                 var layer2_iter = Layer2Iterator{ .shard = shard, .layer2 = layer2_index };
-                var layer2_filter = try BinaryFuseFilter.init(allocator, layer2.keys);
-                try layer2_filter.populateIter(allocator, &layer2_iter);
-                layer2.filter = layer2_filter.data;
+                layer2.filter = try BinaryFuseFilter.init(allocator, layer2.keys);
+                try layer2.filter.?.populateIter(allocator, &layer2_iter);
             }
 
             // Populate each entry filter.
@@ -229,29 +227,19 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
                 var i: usize = 0;
                 while (i < layer2.entries.len) : (i += 1) {
                     var entry = layer2.entries.get(i);
-                    var entry_filter = try BinaryFuseFilter.init(allocator, entry.keys);
-                    try entry_filter.populateIter(allocator, entry.keys_iter);
-                    entry.filter = entry_filter.data;
+                    entry.filter = try BinaryFuseFilter.init(allocator, entry.keys);
+                    try entry.filter.?.populateIter(allocator, entry.keys_iter);
                     layer2.entries.set(i, entry);
                 }
             }
         }
 
         pub fn deinit(shard: *Self, allocator: Allocator) void {
-            if (shard.layer0) |layer0_data| {
-                var layer0_filter = BinaryFuseFilter.from(allocator, layer0_data);
-                layer0_filter.deinit();
-            }
+            if (shard.layer0) |*layer0| layer0.deinit(allocator);
             for (shard.layer1) |*layer2| {
-                if (layer2.filter) |layer2_data| {
-                    var layer2_filter = BinaryFuseFilter.from(allocator, layer2_data);
-                    layer2_filter.deinit();
-                }
+                if (layer2.filter) |*layer2_filter| layer2_filter.deinit(allocator);
                 for (layer2.entries.items(.filter)) |entry_data| {
-                    if (entry_data) |d| {
-                        var entry_filter = BinaryFuseFilter.from(allocator, d);
-                        entry_filter.deinit();
-                    }
+                    if (entry_data) |*entry_filter| entry_filter.deinit(allocator);
                 }
                 layer2.entries.deinit(allocator);
             }
@@ -259,29 +247,26 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
 
         /// reports if the specified key is likely contained by the shard (within the set
         /// false-positive rate.)
-        pub inline fn contains(shard: *const Self, allocator: Allocator, key: u64) bool {
-            var layer0 = BinaryFuseFilter.from(allocator, shard.layer0.?);
-            return layer0.contain(key);
+        pub inline fn contains(shard: *const Self, key: u64) bool {
+            return shard.layer0.?.contain(key);
         }
 
         /// Queries for results from the shard that likely contain the specified key (within the
         /// set false-positive rate.)
         ///
         /// Returns the number of results found.
-        pub inline fn query(shard: *const Self, allocator: Allocator, key: u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
-            var layer0 = BinaryFuseFilter.from(allocator, shard.layer0.?);
-            if (!layer0.contain(key)) {
+        pub inline fn query(shard: *Self, allocator: Allocator, key: u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
+            if (!shard.layer0.?.contain(key)) {
                 return 0;
             }
             var results: usize = 0;
             for (shard.layer1) |*layer2| {
-                var layer1 = BinaryFuseFilter.from(allocator, layer2.filter.?);
+                var layer1 = layer2.filter.?;
                 if (!layer1.contain(key)) {
                     continue;
                 }
-                for (layer2.entries.items(.filter)) |entry_filter_data, i| {
-                    var entry_filter = BinaryFuseFilter.from(allocator, entry_filter_data.?);
-                    if (!entry_filter.contain(key)) continue;
+                for (layer2.entries.items(.filter)) |entry_filter, i| {
+                    if (!entry_filter.?.contain(key)) continue;
                     results += 1;
                     if (dst) |d| try d.append(allocator, layer2.entries.get(i).result);
                 }
@@ -316,21 +301,19 @@ test "shard" {
     defer shard.deinit(allocator);
 
     // Insert a file.
-    const keys_iter = try Iterator.init(allocator, &.{ 1, 2, 3, 4 });
-    defer keys_iter.deinit();
-    try shard.insert(allocator, keys_iter, "Hello world! 1-2-3-4");
+    var keys_iter = Iterator.init(&.{ 1, 2, 3, 4 });
+    try shard.insert(allocator, &keys_iter, "Hello world! 1-2-3-4");
 
     // Insert a file.
-    const keys_iter_2 = try Iterator.init(allocator, &.{ 3, 4, 5 });
-    defer keys_iter_2.deinit();
-    try shard.insert(allocator, keys_iter_2, "Hello world! 3-4-5");
+    var keys_iter_2 = Iterator.init(&.{ 3, 4, 5 });
+    try shard.insert(allocator, &keys_iter_2, "Hello world! 3-4-5");
 
     // Index.
     try shard.index(allocator);
 
     // Super fast containment checks.
-    try testing.expectEqual(true, shard.contains(allocator, 2));
-    try testing.expectEqual(true, shard.contains(allocator, 4));
+    try testing.expectEqual(true, shard.contains(2));
+    try testing.expectEqual(true, shard.contains(4));
 
     // Fast queries.
     // TODO: make these AND/OR list inputs of query keys for improved perf in that case.
