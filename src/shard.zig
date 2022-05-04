@@ -80,7 +80,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
 
             /// null until .index() is invoked.
             filter: ?BinaryFuseFilter = null,
-            keys_iter: Iterator,
+            keys_iter: ?Iterator = null,
             result: Result,
         };
 
@@ -152,7 +152,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             pub inline fn next(iter: *@This()) ?u64 {
                 if (iter.iter == null) {
                     if (iter.shard.layer1[iter.layer2].entries.len == 0) return null;
-                    iter.iter = iter.shard.layer1[iter.layer2].entries.get(0).keys_iter;
+                    iter.iter = iter.shard.layer1[iter.layer2].entries.get(0).keys_iter.?;
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
@@ -162,11 +162,11 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
                         iter.layer2 += 1;
                         iter.entry = 0;
                         if (iter.shard.layer1[iter.layer2].entries.len == 0) return null;
-                        iter.iter = iter.shard.layer1[iter.layer2].entries.get(iter.entry).keys_iter;
+                        iter.iter = iter.shard.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
                         final = iter.iter.?.next();
                     } else {
                         iter.entry += 1;
-                        iter.iter = iter.shard.layer1[iter.layer2].entries.get(iter.entry).keys_iter;
+                        iter.iter = iter.shard.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
                         final = iter.iter.?.next();
                     }
                 }
@@ -188,7 +188,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             pub inline fn next(iter: *@This()) ?u64 {
                 if (iter.iter == null) {
                     if (iter.shard.layer1[iter.layer2].entries.len == 0) return null;
-                    iter.iter = iter.shard.layer1[iter.layer2].entries.get(0).keys_iter;
+                    iter.iter = iter.shard.layer1[iter.layer2].entries.get(0).keys_iter.?;
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
@@ -196,7 +196,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
                         return null;
                     } else {
                         iter.entry += 1;
-                        iter.iter = iter.shard.layer1[iter.layer2].entries.get(iter.entry).keys_iter;
+                        iter.iter = iter.shard.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
                         final = iter.iter.?.next();
                     }
                 }
@@ -230,7 +230,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
                 while (i < layer2.entries.len) : (i += 1) {
                     var entry = layer2.entries.get(i);
                     entry.filter = try BinaryFuseFilter.init(allocator, entry.keys);
-                    try entry.filter.?.populateIter(allocator, entry.keys_iter);
+                    try entry.filter.?.populateIter(allocator, entry.keys_iter.?);
                     layer2.entries.set(i, entry);
                 }
             }
@@ -357,6 +357,156 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             }
             return size;
         }
+
+        pub fn writeFile(
+            shard: *const Self,
+            allocator: Allocator,
+            dir: std.fs.Dir,
+            dest_path: []const u8,
+        ) !void {
+            const baf = try std.io.BufferedAtomicFile.create(allocator, dir, dest_path, .{});
+            defer baf.destroy();
+
+            try shard.serialize(baf.writer());
+            try baf.finish();
+        }
+
+        pub fn serialize(shard: *const Self, stream: anytype) !void {
+            // Constants
+            const version = 1;
+            try stream.writeIntLittle(u16, version);
+            try stream.writeIntLittle(u64, shard.total_keys_estimate);
+            try stream.writeIntLittle(u16, options.filter_bit_size);
+            try stream.writeIntLittle(u64, options.layer1_divisions);
+
+            // Layer0
+            try stream.writeIntLittle(u64, shard.keys);
+            try serializeFilter(stream, &shard.layer0.?);
+            for (shard.layer1) |*layer2| {
+                // Layer1
+                try stream.writeIntLittle(u64, layer2.keys);
+                try serializeFilter(stream, &layer2.filter.?);
+                try stream.writeIntLittle(u32, @intCast(u32, layer2.entries.len));
+
+                var i: usize = 0;
+                while (i < layer2.entries.len) : (i += 1) {
+                    // Layer2
+                    var entry = layer2.entries.get(i);
+                    try stream.writeIntLittle(u64, entry.keys);
+                    try serializeFilter(stream, &entry.filter.?);
+
+                    // TODO: generic result serialization
+                    try stream.writeIntLittle(u64, entry.result);
+                }
+            }
+        }
+
+        fn serializeFilter(stream: anytype, filter: *const BinaryFuseFilter) !void {
+            try stream.writeIntLittle(u64, filter.seed);
+            try stream.writeIntLittle(u32, filter.segment_length);
+            try stream.writeIntLittle(u32, filter.segment_length_mask);
+            try stream.writeIntLittle(u32, filter.segment_count);
+            try stream.writeIntLittle(u32, filter.segment_count_length);
+            try stream.writeIntLittle(u32, @intCast(u32, filter.fingerprints.len));
+
+            const F = std.meta.Elem(@TypeOf(filter.fingerprints));
+            const fingerprint_bytes: []const u8 = filter.fingerprints.ptr[0 .. filter.fingerprints.len * @sizeOf(F)];
+            try stream.writeAll(fingerprint_bytes);
+        }
+
+        pub fn readFile(
+            allocator: Allocator,
+            file_path: []const u8,
+        ) !Self {
+            var file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_only });
+            defer file.close();
+
+            var buf_stream = std.io.bufferedReader(file.reader());
+            return try deserialize(allocator, buf_stream.reader());
+        }
+
+        pub fn deserialize(allocator: Allocator, stream: anytype) !Self {
+            // TODO: if reads here fail, filter allocations would leak.
+
+            // Constants
+            const version = try stream.readIntLittle(u16);
+            std.debug.assert(version == 1);
+            const total_keys_estimate = try stream.readIntLittle(u64);
+            const filter_bit_size = try stream.readIntLittle(u16);
+            const layer1_divisions = try stream.readIntLittle(u64);
+            std.debug.assert(layer1_divisions == options.layer1_divisions);
+            std.debug.assert(filter_bit_size == options.filter_bit_size);
+
+            // Layer0
+            const keys = try stream.readIntLittle(u64);
+            const layer0 = try deserializeFilter(allocator, stream);
+
+            var layer1: [options.layer1_divisions]Layer2 = undefined;
+            var division: usize = 0;
+            while (division < options.layer1_divisions) : (division += 1) {
+                // Layer1
+                const layer2_keys = try stream.readIntLittle(u64);
+                const layer2_filter = try deserializeFilter(allocator, stream);
+                const layer2_entries = try stream.readIntLittle(u32);
+
+                var entries = std.MultiArrayList(Entry){};
+                try entries.resize(allocator, layer2_entries);
+                var i: usize = 0;
+                while (i < entries.len) : (i += 1) {
+                    // Layer2
+                    var entry_keys = try stream.readIntLittle(u64);
+                    var entry_filter = try deserializeFilter(allocator, stream);
+
+                    // TODO: generic result deserialization
+                    var result = try stream.readIntLittle(u64);
+
+                    entries.set(i, Entry{
+                        .keys = entry_keys,
+                        .filter = entry_filter,
+                        .keys_iter = null,
+                        .result = result,
+                    });
+                }
+
+                layer1[division] = Layer2{
+                    .filter = layer2_filter,
+                    .keys = layer2_keys,
+                    .entries = entries,
+                };
+            }
+
+            return Self{
+                .total_keys_estimate = total_keys_estimate,
+                .keys = keys,
+                .layer0 = layer0,
+                .layer1 = layer1,
+            };
+        }
+
+        fn deserializeFilter(allocator: Allocator, stream: anytype) !BinaryFuseFilter {
+            const seed = try stream.readIntLittle(u64);
+            const segment_length = try stream.readIntLittle(u32);
+            const segment_length_mask = try stream.readIntLittle(u32);
+            const segment_count = try stream.readIntLittle(u32);
+            const segment_count_length = try stream.readIntLittle(u32);
+            const fingerprints_len = try stream.readIntLittle(u32);
+
+            const fingerprints = try allocator.alloc(FilterType, fingerprints_len);
+            const fingerprint_bytes: []u8 = fingerprints.ptr[0 .. fingerprints.len * @sizeOf(FilterType)];
+            const read_bytes = try stream.readAll(fingerprint_bytes);
+            if (read_bytes < fingerprint_bytes.len) {
+                allocator.free(fingerprints);
+                return error.EndOfStream;
+            }
+            return BinaryFuseFilter{
+                .seed = seed,
+                .segment_length = segment_length,
+                .segment_length_mask = segment_length_mask,
+                .segment_count = segment_count,
+                .segment_count_length = segment_count_length,
+                .fingerprints = fingerprints,
+            };
+        }
     };
 }
 
@@ -418,3 +568,5 @@ test "shard" {
 
     try testing.expectEqual(@as(usize, 1676), shard.sizeInBytes());
 }
+
+// TODO: serialization/deserialization tests
