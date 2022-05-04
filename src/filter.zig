@@ -101,11 +101,11 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
 
             /// Total number of keys within this layer.
             keys: usize = 0,
-            entries: std.MultiArrayList(Entry),
+            inner_layers: std.MultiArrayList(InnerLayer),
         };
 
-        pub const Entry = struct {
-            /// Total number of keys within the entry.
+        pub const InnerLayer = struct {
+            /// Total number of keys within the inner layer.
             keys: usize = 0,
 
             /// null until .index() is invoked.
@@ -120,7 +120,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         const Self = @This();
 
         /// Initializes the filter with an approximate number of keys that the filter overall is
-        /// expected to contain (e.g. 100_000_000) and estimated number of keys per entry (e.g. 500_000)
+        /// expected to contain (e.g. 100_000_000) and estimated number of keys per result (e.g. 500_000)
         /// which will be used to balance mid layer divisions and keep them at generally equal amounts
         /// of keys.
         pub fn init(total_keys_estimate: usize) Self {
@@ -128,7 +128,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             comptime var division = 0;
             inline while (division < mid_layer.len) : (division += 1) {
                 mid_layer[division] = .{
-                    .entries = std.MultiArrayList(Entry){},
+                    .inner_layers = std.MultiArrayList(InnerLayer){},
                 };
             }
             return Self{
@@ -147,56 +147,56 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         /// The iterator must remain alive at least until .index() is called.
         pub fn insert(filter: *Self, allocator: Allocator, keys_iter: Iterator, result: Result) !void {
             const keys_len = keys_iter.len();
-            const entry = Entry{
+            const inner_layer = InnerLayer{
                 .keys = keys_len,
                 .keys_iter = keys_iter,
                 .result = result,
             };
 
-            // Determine which division of mid_layer this entry should be inserted into.
+            // Determine which division of mid_layer this inner_layer should be inserted into.
             // If we don't find a division with free space below, we'll place it into an evenly
             // distributed division based on number of keys.
             var target_division: usize = keys_len % options.mid_layer_divisions;
 
             const target_keys_per_division = filter.total_keys_estimate / options.mid_layer_divisions;
             for (filter.mid_layer) |division, division_index| {
-                if (division.keys + entry.keys >= target_keys_per_division) continue;
+                if (division.keys + inner_layer.keys >= target_keys_per_division) continue;
 
                 // Found a division we can place it into.
                 target_division = division_index;
                 break;
             }
 
-            filter.keys += entry.keys;
-            filter.mid_layer[target_division].keys += entry.keys;
-            try filter.mid_layer[target_division].entries.append(allocator, entry);
+            filter.keys += inner_layer.keys;
+            filter.mid_layer[target_division].keys += inner_layer.keys;
+            try filter.mid_layer[target_division].inner_layers.append(allocator, inner_layer);
         }
 
         /// Iterates every key in a filter.
         const AllKeysIter = struct {
             filter: *Self,
             inner: usize = 0,
-            entry: usize = 0,
+            inner_layer: usize = 0,
             iter: ?Iterator = null,
 
             pub inline fn next(iter: *@This()) ?u64 {
                 if (iter.iter == null) {
-                    if (iter.filter.mid_layer[iter.inner].entries.len == 0) return null;
-                    iter.iter = iter.filter.mid_layer[iter.inner].entries.get(0).keys_iter.?;
+                    if (iter.filter.mid_layer[iter.inner].inner_layers.len == 0) return null;
+                    iter.iter = iter.filter.mid_layer[iter.inner].inner_layers.get(0).keys_iter.?;
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
-                    if (iter.entry == iter.filter.mid_layer[iter.inner].entries.len - 1) {
+                    if (iter.inner_layer == iter.filter.mid_layer[iter.inner].inner_layers.len - 1) {
                         if (iter.inner == iter.filter.mid_layer.len - 1) return null; // no further inner layer's
                         // Next inner layer.
                         iter.inner += 1;
-                        iter.entry = 0;
-                        if (iter.filter.mid_layer[iter.inner].entries.len == 0) return null;
-                        iter.iter = iter.filter.mid_layer[iter.inner].entries.get(iter.entry).keys_iter.?;
+                        iter.inner_layer = 0;
+                        if (iter.filter.mid_layer[iter.inner].inner_layers.len == 0) return null;
+                        iter.iter = iter.filter.mid_layer[iter.inner].inner_layers.get(iter.inner_layer).keys_iter.?;
                         final = iter.iter.?.next();
                     } else {
-                        iter.entry += 1;
-                        iter.iter = iter.filter.mid_layer[iter.inner].entries.get(iter.entry).keys_iter.?;
+                        iter.inner_layer += 1;
+                        iter.iter = iter.filter.mid_layer[iter.inner].inner_layers.get(iter.inner_layer).keys_iter.?;
                         final = iter.iter.?.next();
                     }
                 }
@@ -212,21 +212,21 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         const InnerIterator = struct {
             filter: *Self,
             inner: usize,
-            entry: usize = 0,
+            inner_layer: usize = 0,
             iter: ?Iterator = null,
 
             pub inline fn next(iter: *@This()) ?u64 {
                 if (iter.iter == null) {
-                    if (iter.filter.mid_layer[iter.inner].entries.len == 0) return null;
-                    iter.iter = iter.filter.mid_layer[iter.inner].entries.get(0).keys_iter.?;
+                    if (iter.filter.mid_layer[iter.inner].inner_layers.len == 0) return null;
+                    iter.iter = iter.filter.mid_layer[iter.inner].inner_layers.get(0).keys_iter.?;
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
-                    if (iter.entry == iter.filter.mid_layer[iter.inner].entries.len - 1) {
+                    if (iter.inner_layer == iter.filter.mid_layer[iter.inner].inner_layers.len - 1) {
                         return null;
                     } else {
-                        iter.entry += 1;
-                        iter.iter = iter.filter.mid_layer[iter.inner].entries.get(iter.entry).keys_iter.?;
+                        iter.inner_layer += 1;
+                        iter.iter = iter.filter.mid_layer[iter.inner].inner_layers.get(iter.inner_layer).keys_iter.?;
                         final = iter.iter.?.next();
                     }
                 }
@@ -239,7 +239,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         };
 
         /// Indexes the filter, populating all of the fastfilters using the key iterators of the
-        /// entries. Must be performed once finished inserting entries. Can be called again to
+        /// results. Must be performed once finished inserting results. Can be called again to
         /// update the filter (although this performs a full rebuild.)
         pub fn index(filter: *Self, allocator: Allocator) !void {
             // Populate outer layer with all keys.
@@ -254,14 +254,14 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 try inner.filter.?.populateIter(allocator, &inner_iter);
             }
 
-            // Populate each entry filter.
+            // Populate each inner_layer filter.
             for (filter.mid_layer) |*inner| {
                 var i: usize = 0;
-                while (i < inner.entries.len) : (i += 1) {
-                    var entry = inner.entries.get(i);
-                    entry.filter = try BinaryFuseFilter.init(allocator, entry.keys);
-                    try entry.filter.?.populateIter(allocator, entry.keys_iter.?);
-                    inner.entries.set(i, entry);
+                while (i < inner.inner_layers.len) : (i += 1) {
+                    var inner_layer = inner.inner_layers.get(i);
+                    inner_layer.filter = try BinaryFuseFilter.init(allocator, inner_layer.keys);
+                    try inner_layer.filter.?.populateIter(allocator, inner_layer.keys_iter.?);
+                    inner.inner_layers.set(i, inner_layer);
                 }
             }
         }
@@ -270,10 +270,10 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             if (filter.outer_layer) |*outer_layer| outer_layer.deinit(allocator);
             for (filter.mid_layer) |*inner| {
                 if (inner.filter) |*inner_filter| inner_filter.deinit(allocator);
-                for (inner.entries.items(.filter)) |entry_data| {
-                    if (entry_data) |*entry_filter| entry_filter.deinit(allocator);
+                for (inner.inner_layers.items(.filter)) |inner_layer_data| {
+                    if (inner_layer_data) |*inner_layer_filter| inner_layer_filter.deinit(allocator);
                 }
-                inner.entries.deinit(allocator);
+                inner.inner_layers.deinit(allocator);
             }
         }
 
@@ -283,8 +283,8 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             return filter.outer_layer.?.contain(key);
         }
 
-        /// Queries for results from the filter, returning results for entries that likely match one
-        /// of the keys in `or_keys`.
+        /// Queries for results from the filter, returning results whose keys likely match one of
+        /// the keys in `or_keys`.
         ///
         /// Returns the number of results found.
         pub inline fn queryLogicalOr(filter: *Self, allocator: Allocator, or_keys: []const u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
@@ -311,10 +311,10 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 };
                 if (!any) continue;
 
-                for (inner.entries.items(.filter)) |entry_filter, i| {
+                for (inner.inner_layers.items(.filter)) |inner_layer_filter, i| {
                     any = blk: {
                         for (or_keys) |key| {
-                            if (entry_filter.?.contain(key)) {
+                            if (inner_layer_filter.?.contain(key)) {
                                 break :blk true;
                             }
                         }
@@ -323,14 +323,14 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                     if (!any) continue;
 
                     results += 1;
-                    if (dst) |d| try d.append(allocator, inner.entries.get(i).result);
+                    if (dst) |d| try d.append(allocator, inner.inner_layers.get(i).result);
                 }
             }
             return results;
         }
 
-        /// Queries for results from the filter, returning results for entries that likely match all
-        /// of the keys in `and_keys`.
+        /// Queries for results from the filter, returning results whose keys likely match all of
+        /// the keys in `and_keys`.
         ///
         /// Returns the number of results found.
         pub inline fn queryLogicalAnd(filter: *Self, allocator: Allocator, and_keys: []const u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
@@ -357,10 +357,10 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 };
                 if (!all) continue;
 
-                for (inner.entries.items(.filter)) |entry_filter, i| {
+                for (inner.inner_layers.items(.filter)) |inner_layer_filter, i| {
                     all = blk: {
                         for (and_keys) |key| {
-                            if (!entry_filter.?.contain(key)) {
+                            if (!inner_layer_filter.?.contain(key)) {
                                 break :blk false;
                             }
                         }
@@ -369,7 +369,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                     if (!all) continue;
 
                     results += 1;
-                    if (dst) |d| try d.append(allocator, inner.entries.get(i).result);
+                    if (dst) |d| try d.append(allocator, inner.inner_layers.get(i).result);
                 }
             }
             return results;
@@ -380,9 +380,9 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             if (filter.outer_layer) |outer_filter| size += outer_filter.sizeInBytes();
             for (filter.mid_layer) |*inner| {
                 if (inner.filter) |inner_filter| size += inner_filter.sizeInBytes();
-                for (inner.entries.items(.filter)) |entry_filter| {
-                    if (entry_filter) |f| size += f.sizeInBytes();
-                    size += @sizeOf(Entry);
+                for (inner.inner_layers.items(.filter)) |inner_layer_filter| {
+                    if (inner_layer_filter) |f| size += f.sizeInBytes();
+                    size += @sizeOf(InnerLayer);
                 }
             }
             return size;
@@ -416,17 +416,17 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 // Mid layer
                 try stream.writeIntLittle(u64, inner.keys);
                 try serializeFilter(stream, &inner.filter.?);
-                try stream.writeIntLittle(u32, @intCast(u32, inner.entries.len));
+                try stream.writeIntLittle(u32, @intCast(u32, inner.inner_layers.len));
 
                 var i: usize = 0;
-                while (i < inner.entries.len) : (i += 1) {
+                while (i < inner.inner_layers.len) : (i += 1) {
                     // Inner layer
-                    var entry = inner.entries.get(i);
-                    try stream.writeIntLittle(u64, entry.keys);
-                    try serializeFilter(stream, &entry.filter.?);
+                    var inner_layer = inner.inner_layers.get(i);
+                    try stream.writeIntLittle(u64, inner_layer.keys);
+                    try serializeFilter(stream, &inner_layer.filter.?);
 
                     // TODO: generic result serialization
-                    try stream.writeIntLittle(u64, entry.result);
+                    try stream.writeIntLittle(u64, inner_layer.result);
                 }
             }
         }
@@ -477,22 +477,22 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 // Mid layer
                 const inner_keys = try stream.readIntLittle(u64);
                 const inner_filter = try deserializeFilter(allocator, stream);
-                const inner_entries = try stream.readIntLittle(u32);
+                const inner_layers_len = try stream.readIntLittle(u32);
 
-                var entries = std.MultiArrayList(Entry){};
-                try entries.resize(allocator, inner_entries);
+                var inner_layers = std.MultiArrayList(InnerLayer){};
+                try inner_layers.resize(allocator, inner_layers_len);
                 var i: usize = 0;
-                while (i < entries.len) : (i += 1) {
+                while (i < inner_layers.len) : (i += 1) {
                     // Inner Layer
-                    var entry_keys = try stream.readIntLittle(u64);
-                    var entry_filter = try deserializeFilter(allocator, stream);
+                    var inner_layer_keys = try stream.readIntLittle(u64);
+                    var inner_layer_filter = try deserializeFilter(allocator, stream);
 
                     // TODO: generic result deserialization
                     var result = try stream.readIntLittle(u64);
 
-                    entries.set(i, Entry{
-                        .keys = entry_keys,
-                        .filter = entry_filter,
+                    inner_layers.set(i, InnerLayer{
+                        .keys = inner_layer_keys,
+                        .filter = inner_layer_filter,
                         .keys_iter = null,
                         .result = result,
                     });
@@ -501,7 +501,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 mid_layer[division] = Inner{
                     .filter = inner_filter,
                     .keys = inner_keys,
-                    .entries = entries,
+                    .inner_layers = inner_layers,
                 };
             }
 
