@@ -11,8 +11,8 @@ const Options = struct {
     /// time. See https://github.com/hexops/fastfilter#benchmarks
     filter_bit_size: u16 = 8,
 
-    /// The number of divisions in layer1.
-    layer1_divisions: usize = 8,
+    /// The number of divisions in the mid layer.
+    mid_layer_divisions: usize = 8,
 };
 
 /// A sinter filter. They are designed to represent many matching keys (integers, e.g. hashes of
@@ -24,7 +24,8 @@ const Options = struct {
 /// Querying results from a sinter filter is as easy as providing matching keys. Key equality is
 /// exact only, you can acquire "fuzzy" matching of results by e.g. emitting a single key for every
 /// string you might want to match. To query, you provide a set of keys that should logically AND/OR
-/// intersect with results' keys.
+/// intersect with results' keys. Due to statistical nature of fastfilters, it is possible to get
+/// false-positive matches but never false-negatives.
 ///
 /// A sinter filter is designed to be built, indexed, and queried within a single CPU core. You
 /// should look at the indexing time, memory usage, query time, and based on those numbers decide
@@ -55,20 +56,20 @@ const Options = struct {
 /// The filter is represented in three layers (all perf measured on Ryzen 9 3900X w/ 100 million
 /// keys):
 ///
-/// - layer0: the topmost fastfilter which is capable of determining if a given key is present in
-///   any result within the entire filter. e.g. if a word is present in any of the 200 files (assuming
-///   200 files is about 100,000,000 words/keys.)
+/// - outer layer: the topmost fastfilter which is capable of determining if a given key is present
+///   in any result within the entire filter. e.g. if a word is present in any of the 200 files
+///   (assuming 200 files is about 100,000,000 words/keys.)
 ///     - Indexing: 2 GiB / 6.9s
 ///     - Filter size: 107 MiB
 ///     - Query speed: 167ns
-/// - layer1: A configurable number of fastfilters, which divide layer0 into N sets (typically 8.)
-///   e.g. while layer0 says "this word is in one of these 200 files", layer1 says "it's in one
-///   of these 25 files"
+/// - mid layer: A configurable number of fastfilters, which divide the outer layer into N sets
+///   (typically 8.) e.g. while the outer layer says "this word is in one of these 200 files", the
+///   mid layer says "it's in one of these 25 files"
 ///     - Indexing: 225 MiB / 572.3ms (per set)
 ///     - Filter size: 10 MiB (per set)
 ///     - Query speed: 33ns (per set)
-/// - layer2: the lowest level fastfilter which represents whether or not a given key is present in
-///   a final result. e.g. layer2 says "this word is in this file" concretely.
+/// - inner layer: the lowest level fastfilter which represents whether or not a given key is
+///   present in a final result. e.g. the inner layer says "this word is in this file".
 ///     - Indexing: <22 MiB / <44.6ms
 ///     - Filter size: <1 MiB
 ///     - Query speed: <24ns
@@ -77,9 +78,9 @@ const Options = struct {
 /// could be estimated on a single sinter filter (single CPU core) to be:
 ///
 /// - Indexing peak mem: ~2 GiB
-/// - Indexing time: 20.4s (6.9s layer0, 4.6s layer1, 8.9s layer2)
-/// - Query (best case): 224ns (167ns layer0, 33ns layer1, 24ns layer2)
-/// - Query (worst case): 1031ns (167ns layer0, 33ns*8 layer1, 24ns*25 layer2)
+/// - Indexing time: 20.4s (6.9s outer, 4.6s mid, 8.9s inner)
+/// - Query (best case): 224ns (167ns outer, 33ns mid, 24ns inner)
+/// - Query (worst case): 1031ns (167ns outer, 33ns*8 mid, 24ns*25 inner)
 ///
 pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterator: type) type {
     return struct {
@@ -90,11 +91,11 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         keys: usize = 0,
 
         /// null until .index() is invoked.
-        layer0: ?BinaryFuseFilter = null,
+        outer_layer: ?BinaryFuseFilter = null,
 
-        layer1: [options.layer1_divisions]Layer2,
+        mid_layer: [options.mid_layer_divisions]Inner,
 
-        pub const Layer2 = struct {
+        pub const Inner = struct {
             /// null until .index() is invoked.
             filter: ?BinaryFuseFilter = null,
 
@@ -120,20 +121,20 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
 
         /// Initializes the filter with an approximate number of keys that the filter overall is
         /// expected to contain (e.g. 100_000_000) and estimated number of keys per entry (e.g. 500_000)
-        /// which will be used to balance layer1 divisions and keep them at generally equal amounts
+        /// which will be used to balance mid layer divisions and keep them at generally equal amounts
         /// of keys.
         pub fn init(total_keys_estimate: usize) Self {
-            var layer1: [options.layer1_divisions]Layer2 = undefined;
+            var mid_layer: [options.mid_layer_divisions]Inner = undefined;
             comptime var division = 0;
-            inline while (division < layer1.len) : (division += 1) {
-                layer1[division] = .{
+            inline while (division < mid_layer.len) : (division += 1) {
+                mid_layer[division] = .{
                     .entries = std.MultiArrayList(Entry){},
                 };
             }
             return Self{
                 .total_keys_estimate = total_keys_estimate,
-                .layer0 = null,
-                .layer1 = layer1,
+                .outer_layer = null,
+                .mid_layer = mid_layer,
             };
         }
 
@@ -152,13 +153,13 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 .result = result,
             };
 
-            // Determine which division of layer1 this entry should be inserted into.
+            // Determine which division of mid_layer this entry should be inserted into.
             // If we don't find a division with free space below, we'll place it into an evenly
             // distributed division based on number of keys.
-            var target_division: usize = keys_len % options.layer1_divisions;
+            var target_division: usize = keys_len % options.mid_layer_divisions;
 
-            const target_keys_per_division = filter.total_keys_estimate / options.layer1_divisions;
-            for (filter.layer1) |division, division_index| {
+            const target_keys_per_division = filter.total_keys_estimate / options.mid_layer_divisions;
+            for (filter.mid_layer) |division, division_index| {
                 if (division.keys + entry.keys >= target_keys_per_division) continue;
 
                 // Found a division we can place it into.
@@ -167,35 +168,35 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             }
 
             filter.keys += entry.keys;
-            filter.layer1[target_division].keys += entry.keys;
-            try filter.layer1[target_division].entries.append(allocator, entry);
+            filter.mid_layer[target_division].keys += entry.keys;
+            try filter.mid_layer[target_division].entries.append(allocator, entry);
         }
 
         /// Iterates every key in a filter.
         const AllKeysIter = struct {
             filter: *Self,
-            layer2: usize = 0,
+            inner: usize = 0,
             entry: usize = 0,
             iter: ?Iterator = null,
 
             pub inline fn next(iter: *@This()) ?u64 {
                 if (iter.iter == null) {
-                    if (iter.filter.layer1[iter.layer2].entries.len == 0) return null;
-                    iter.iter = iter.filter.layer1[iter.layer2].entries.get(0).keys_iter.?;
+                    if (iter.filter.mid_layer[iter.inner].entries.len == 0) return null;
+                    iter.iter = iter.filter.mid_layer[iter.inner].entries.get(0).keys_iter.?;
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
-                    if (iter.entry == iter.filter.layer1[iter.layer2].entries.len - 1) {
-                        if (iter.layer2 == iter.filter.layer1.len - 1) return null; // no further layer2's
-                        // Next layer2.
-                        iter.layer2 += 1;
+                    if (iter.entry == iter.filter.mid_layer[iter.inner].entries.len - 1) {
+                        if (iter.inner == iter.filter.mid_layer.len - 1) return null; // no further inner layer's
+                        // Next inner layer.
+                        iter.inner += 1;
                         iter.entry = 0;
-                        if (iter.filter.layer1[iter.layer2].entries.len == 0) return null;
-                        iter.iter = iter.filter.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
+                        if (iter.filter.mid_layer[iter.inner].entries.len == 0) return null;
+                        iter.iter = iter.filter.mid_layer[iter.inner].entries.get(iter.entry).keys_iter.?;
                         final = iter.iter.?.next();
                     } else {
                         iter.entry += 1;
-                        iter.iter = iter.filter.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
+                        iter.iter = iter.filter.mid_layer[iter.inner].entries.get(iter.entry).keys_iter.?;
                         final = iter.iter.?.next();
                     }
                 }
@@ -207,25 +208,25 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             }
         };
 
-        /// Iterates every key in layer2 / a single division of layer1.
-        const Layer2Iterator = struct {
+        /// Iterates every key in inner layer / a single division of mid_layer.
+        const InnerIterator = struct {
             filter: *Self,
-            layer2: usize,
+            inner: usize,
             entry: usize = 0,
             iter: ?Iterator = null,
 
             pub inline fn next(iter: *@This()) ?u64 {
                 if (iter.iter == null) {
-                    if (iter.filter.layer1[iter.layer2].entries.len == 0) return null;
-                    iter.iter = iter.filter.layer1[iter.layer2].entries.get(0).keys_iter.?;
+                    if (iter.filter.mid_layer[iter.inner].entries.len == 0) return null;
+                    iter.iter = iter.filter.mid_layer[iter.inner].entries.get(0).keys_iter.?;
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
-                    if (iter.entry == iter.filter.layer1[iter.layer2].entries.len - 1) {
+                    if (iter.entry == iter.filter.mid_layer[iter.inner].entries.len - 1) {
                         return null;
                     } else {
                         iter.entry += 1;
-                        iter.iter = iter.filter.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
+                        iter.iter = iter.filter.mid_layer[iter.inner].entries.get(iter.entry).keys_iter.?;
                         final = iter.iter.?.next();
                     }
                 }
@@ -241,45 +242,45 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         /// entries. Must be performed once finished inserting entries. Can be called again to
         /// update the filter (although this performs a full rebuild.)
         pub fn index(filter: *Self, allocator: Allocator) !void {
-            // Populate layer0 with all keys.
+            // Populate outer layer with all keys.
             var all_keys_iter = AllKeysIter{ .filter = filter };
-            filter.layer0 = try BinaryFuseFilter.init(allocator, filter.keys);
-            try filter.layer0.?.populateIter(allocator, &all_keys_iter);
+            filter.outer_layer = try BinaryFuseFilter.init(allocator, filter.keys);
+            try filter.outer_layer.?.populateIter(allocator, &all_keys_iter);
 
-            // Populate each layer2 filter, with their division of keys.
-            for (filter.layer1) |*layer2, layer2_index| {
-                var layer2_iter = Layer2Iterator{ .filter = filter, .layer2 = layer2_index };
-                layer2.filter = try BinaryFuseFilter.init(allocator, layer2.keys);
-                try layer2.filter.?.populateIter(allocator, &layer2_iter);
+            // Populate each inner layer filter, with their division of keys.
+            for (filter.mid_layer) |*inner, inner_index| {
+                var inner_iter = InnerIterator{ .filter = filter, .inner = inner_index };
+                inner.filter = try BinaryFuseFilter.init(allocator, inner.keys);
+                try inner.filter.?.populateIter(allocator, &inner_iter);
             }
 
             // Populate each entry filter.
-            for (filter.layer1) |*layer2| {
+            for (filter.mid_layer) |*inner| {
                 var i: usize = 0;
-                while (i < layer2.entries.len) : (i += 1) {
-                    var entry = layer2.entries.get(i);
+                while (i < inner.entries.len) : (i += 1) {
+                    var entry = inner.entries.get(i);
                     entry.filter = try BinaryFuseFilter.init(allocator, entry.keys);
                     try entry.filter.?.populateIter(allocator, entry.keys_iter.?);
-                    layer2.entries.set(i, entry);
+                    inner.entries.set(i, entry);
                 }
             }
         }
 
         pub fn deinit(filter: *Self, allocator: Allocator) void {
-            if (filter.layer0) |*layer0| layer0.deinit(allocator);
-            for (filter.layer1) |*layer2| {
-                if (layer2.filter) |*layer2_filter| layer2_filter.deinit(allocator);
-                for (layer2.entries.items(.filter)) |entry_data| {
+            if (filter.outer_layer) |*outer_layer| outer_layer.deinit(allocator);
+            for (filter.mid_layer) |*inner| {
+                if (inner.filter) |*inner_filter| inner_filter.deinit(allocator);
+                for (inner.entries.items(.filter)) |entry_data| {
                     if (entry_data) |*entry_filter| entry_filter.deinit(allocator);
                 }
-                layer2.entries.deinit(allocator);
+                inner.entries.deinit(allocator);
             }
         }
 
         /// reports if the specified key is likely contained by the filter (within the set
         /// false-positive rate.)
         pub inline fn contains(filter: *const Self, key: u64) bool {
-            return filter.layer0.?.contain(key);
+            return filter.outer_layer.?.contain(key);
         }
 
         /// Queries for results from the filter, returning results for entries that likely match one
@@ -289,7 +290,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         pub inline fn queryLogicalOr(filter: *Self, allocator: Allocator, or_keys: []const u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
             var any = blk: {
                 for (or_keys) |key| {
-                    if (filter.layer0.?.contain(key)) {
+                    if (filter.outer_layer.?.contain(key)) {
                         break :blk true;
                     }
                 }
@@ -298,11 +299,11 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             if (!any) return 0;
 
             var results: usize = 0;
-            for (filter.layer1) |*layer2| {
-                var layer1 = layer2.filter.?;
+            for (filter.mid_layer) |*inner| {
+                var mid_layer = inner.filter.?;
                 any = blk: {
                     for (or_keys) |key| {
-                        if (layer1.contain(key)) {
+                        if (mid_layer.contain(key)) {
                             break :blk true;
                         }
                     }
@@ -310,7 +311,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 };
                 if (!any) continue;
 
-                for (layer2.entries.items(.filter)) |entry_filter, i| {
+                for (inner.entries.items(.filter)) |entry_filter, i| {
                     any = blk: {
                         for (or_keys) |key| {
                             if (entry_filter.?.contain(key)) {
@@ -322,7 +323,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                     if (!any) continue;
 
                     results += 1;
-                    if (dst) |d| try d.append(allocator, layer2.entries.get(i).result);
+                    if (dst) |d| try d.append(allocator, inner.entries.get(i).result);
                 }
             }
             return results;
@@ -335,7 +336,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         pub inline fn queryLogicalAnd(filter: *Self, allocator: Allocator, and_keys: []const u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
             var all = blk: {
                 for (and_keys) |key| {
-                    if (!filter.layer0.?.contain(key)) {
+                    if (!filter.outer_layer.?.contain(key)) {
                         break :blk false;
                     }
                 }
@@ -344,11 +345,11 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             if (!all) return 0;
 
             var results: usize = 0;
-            for (filter.layer1) |*layer2| {
-                var layer1 = layer2.filter.?;
+            for (filter.mid_layer) |*inner| {
+                var mid_layer = inner.filter.?;
                 all = blk: {
                     for (and_keys) |key| {
-                        if (!layer1.contain(key)) {
+                        if (!mid_layer.contain(key)) {
                             break :blk false;
                         }
                     }
@@ -356,7 +357,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 };
                 if (!all) continue;
 
-                for (layer2.entries.items(.filter)) |entry_filter, i| {
+                for (inner.entries.items(.filter)) |entry_filter, i| {
                     all = blk: {
                         for (and_keys) |key| {
                             if (!entry_filter.?.contain(key)) {
@@ -368,7 +369,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                     if (!all) continue;
 
                     results += 1;
-                    if (dst) |d| try d.append(allocator, layer2.entries.get(i).result);
+                    if (dst) |d| try d.append(allocator, inner.entries.get(i).result);
                 }
             }
             return results;
@@ -376,10 +377,10 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
 
         pub fn sizeInBytes(filter: *const Self) usize {
             var size: usize = @sizeOf(Self);
-            if (filter.layer0) |layer0_filter| size += layer0_filter.sizeInBytes();
-            for (filter.layer1) |*layer2| {
-                if (layer2.filter) |layer2_filter| size += layer2_filter.sizeInBytes();
-                for (layer2.entries.items(.filter)) |entry_filter| {
+            if (filter.outer_layer) |outer_filter| size += outer_filter.sizeInBytes();
+            for (filter.mid_layer) |*inner| {
+                if (inner.filter) |inner_filter| size += inner_filter.sizeInBytes();
+                for (inner.entries.items(.filter)) |entry_filter| {
                     if (entry_filter) |f| size += f.sizeInBytes();
                     size += @sizeOf(Entry);
                 }
@@ -406,21 +407,21 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             try stream.writeIntLittle(u16, version);
             try stream.writeIntLittle(u64, filter.total_keys_estimate);
             try stream.writeIntLittle(u16, options.filter_bit_size);
-            try stream.writeIntLittle(u64, options.layer1_divisions);
+            try stream.writeIntLittle(u64, options.mid_layer_divisions);
 
-            // Layer0
+            // Outer layer
             try stream.writeIntLittle(u64, filter.keys);
-            try serializeFilter(stream, &filter.layer0.?);
-            for (filter.layer1) |*layer2| {
-                // Layer1
-                try stream.writeIntLittle(u64, layer2.keys);
-                try serializeFilter(stream, &layer2.filter.?);
-                try stream.writeIntLittle(u32, @intCast(u32, layer2.entries.len));
+            try serializeFilter(stream, &filter.outer_layer.?);
+            for (filter.mid_layer) |*inner| {
+                // Mid layer
+                try stream.writeIntLittle(u64, inner.keys);
+                try serializeFilter(stream, &inner.filter.?);
+                try stream.writeIntLittle(u32, @intCast(u32, inner.entries.len));
 
                 var i: usize = 0;
-                while (i < layer2.entries.len) : (i += 1) {
-                    // Layer2
-                    var entry = layer2.entries.get(i);
+                while (i < inner.entries.len) : (i += 1) {
+                    // Inner layer
+                    var entry = inner.entries.get(i);
                     try stream.writeIntLittle(u64, entry.keys);
                     try serializeFilter(stream, &entry.filter.?);
 
@@ -462,27 +463,27 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             std.debug.assert(version == 1);
             const total_keys_estimate = try stream.readIntLittle(u64);
             const filter_bit_size = try stream.readIntLittle(u16);
-            const layer1_divisions = try stream.readIntLittle(u64);
-            std.debug.assert(layer1_divisions == options.layer1_divisions);
+            const mid_layer_divisions = try stream.readIntLittle(u64);
+            std.debug.assert(mid_layer_divisions == options.mid_layer_divisions);
             std.debug.assert(filter_bit_size == options.filter_bit_size);
 
-            // Layer0
+            // Outer layer
             const keys = try stream.readIntLittle(u64);
-            const layer0 = try deserializeFilter(allocator, stream);
+            const outer_layer = try deserializeFilter(allocator, stream);
 
-            var layer1: [options.layer1_divisions]Layer2 = undefined;
+            var mid_layer: [options.mid_layer_divisions]Inner = undefined;
             var division: usize = 0;
-            while (division < options.layer1_divisions) : (division += 1) {
-                // Layer1
-                const layer2_keys = try stream.readIntLittle(u64);
-                const layer2_filter = try deserializeFilter(allocator, stream);
-                const layer2_entries = try stream.readIntLittle(u32);
+            while (division < options.mid_layer_divisions) : (division += 1) {
+                // Mid layer
+                const inner_keys = try stream.readIntLittle(u64);
+                const inner_filter = try deserializeFilter(allocator, stream);
+                const inner_entries = try stream.readIntLittle(u32);
 
                 var entries = std.MultiArrayList(Entry){};
-                try entries.resize(allocator, layer2_entries);
+                try entries.resize(allocator, inner_entries);
                 var i: usize = 0;
                 while (i < entries.len) : (i += 1) {
-                    // Layer2
+                    // Inner Layer
                     var entry_keys = try stream.readIntLittle(u64);
                     var entry_filter = try deserializeFilter(allocator, stream);
 
@@ -497,9 +498,9 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                     });
                 }
 
-                layer1[division] = Layer2{
-                    .filter = layer2_filter,
-                    .keys = layer2_keys,
+                mid_layer[division] = Inner{
+                    .filter = inner_filter,
+                    .keys = inner_keys,
                     .entries = entries,
                 };
             }
@@ -507,8 +508,8 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             return Self{
                 .total_keys_estimate = total_keys_estimate,
                 .keys = keys,
-                .layer0 = layer0,
-                .layer1 = layer1,
+                .outer_layer = outer_layer,
+                .mid_layer = mid_layer,
             };
         }
 
