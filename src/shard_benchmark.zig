@@ -74,9 +74,17 @@ pub fn main() !void {
     }
     const queryAndTimeEnd = timer.lap();
 
+    const writeFileTimeStart = timer.lap();
+    try shard.writeFile(gpa, std.fs.cwd(), "benchmark.sinter");
+    const writeFileTimeEnd = timer.lap();
+
+    const readFileTimeStart = timer.lap();
+    _ = try TestShard.readFile(gpa, "benchmark.sinter");
+    const readFileTimeEnd = timer.lap();
+
     const stdout = std.io.getStdOut().writer();
-    try stdout.print("| # keys    | # results | # keys per result | index time | OR-200 query time | AND-200 query time |\n", .{});
-    try stdout.print("|-----------|-----------|-------------------|------------|-------------------|--------------------|\n", .{});
+    try stdout.print("| # keys    | # results | # keys per result | index time | OR-200 query time | AND-200 query time | writeFile time | readFile time |\n", .{});
+    try stdout.print("|-----------|-----------|-------------------|------------|-------------------|--------------------|----------------|---------------|\n", .{});
     try stdout.print("| {: <9}", .{estimated_keys});
     try stdout.print(" | {: <9}", .{num_results});
     try stdout.print(" | {: <17}", .{num_keys_per_result});
@@ -86,6 +94,10 @@ pub fn main() !void {
     try formatTime(stdout, "{d: >14.1}{s}", queryOrTimeStart, queryOrTimeEnd, query_laps);
     try stdout.print(" | ", .{});
     try formatTime(stdout, "{d: >15.1}{s}", queryAndTimeStart, queryAndTimeEnd, query_laps);
+    try stdout.print(" | ", .{});
+    try formatTime(stdout, "{d: >11.1}{s}", writeFileTimeStart, writeFileTimeEnd, 1);
+    try stdout.print(" | ", .{});
+    try formatTime(stdout, "{d: >10.1}{s}", readFileTimeStart, readFileTimeEnd, 1);
     try stdout.print(" |\n", .{});
 }
 
