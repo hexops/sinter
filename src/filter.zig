@@ -93,9 +93,9 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         /// null until .index() is invoked.
         outer_layer: ?BinaryFuseFilter = null,
 
-        mid_layer: [options.mid_layer_divisions]Inner,
+        mid_layer: [options.mid_layer_divisions]MidLayer,
 
-        pub const Inner = struct {
+        pub const MidLayer = struct {
             /// null until .index() is invoked.
             filter: ?BinaryFuseFilter = null,
 
@@ -124,7 +124,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         /// which will be used to balance mid layer divisions and keep them at generally equal amounts
         /// of keys.
         pub fn init(total_keys_estimate: usize) Self {
-            var mid_layer: [options.mid_layer_divisions]Inner = undefined;
+            var mid_layer: [options.mid_layer_divisions]MidLayer = undefined;
             comptime var division = 0;
             inline while (division < mid_layer.len) : (division += 1) {
                 mid_layer[division] = .{
@@ -412,16 +412,16 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             // Outer layer
             try stream.writeIntLittle(u64, filter.keys);
             try serializeFilter(stream, &filter.outer_layer.?);
-            for (filter.mid_layer) |*inner| {
+            for (filter.mid_layer) |*mid_layer| {
                 // Mid layer
-                try stream.writeIntLittle(u64, inner.keys);
-                try serializeFilter(stream, &inner.filter.?);
-                try stream.writeIntLittle(u32, @intCast(u32, inner.inner_layers.len));
+                try stream.writeIntLittle(u64, mid_layer.keys);
+                try serializeFilter(stream, &mid_layer.filter.?);
+                try stream.writeIntLittle(u32, @intCast(u32, mid_layer.inner_layers.len));
 
                 var i: usize = 0;
-                while (i < inner.inner_layers.len) : (i += 1) {
+                while (i < mid_layer.inner_layers.len) : (i += 1) {
                     // Inner layer
-                    var inner_layer = inner.inner_layers.get(i);
+                    var inner_layer = mid_layer.inner_layers.get(i);
                     try stream.writeIntLittle(u64, inner_layer.keys);
                     try serializeFilter(stream, &inner_layer.filter.?);
 
@@ -471,12 +471,12 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             const keys = try stream.readIntLittle(u64);
             const outer_layer = try deserializeFilter(allocator, stream);
 
-            var mid_layer: [options.mid_layer_divisions]Inner = undefined;
+            var mid_layer: [options.mid_layer_divisions]MidLayer = undefined;
             var division: usize = 0;
             while (division < options.mid_layer_divisions) : (division += 1) {
                 // Mid layer
-                const inner_keys = try stream.readIntLittle(u64);
-                const inner_filter = try deserializeFilter(allocator, stream);
+                const mid_layer_keys = try stream.readIntLittle(u64);
+                const mid_layer_filter = try deserializeFilter(allocator, stream);
                 const inner_layers_len = try stream.readIntLittle(u32);
 
                 var inner_layers = std.MultiArrayList(InnerLayer){};
@@ -498,9 +498,9 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                     });
                 }
 
-                mid_layer[division] = Inner{
-                    .filter = inner_filter,
-                    .keys = inner_keys,
+                mid_layer[division] = MidLayer{
+                    .filter = mid_layer_filter,
+                    .keys = mid_layer_keys,
                     .inner_layers = inner_layers,
                 };
             }
