@@ -17,18 +17,18 @@ pub fn build(b: *std.build.Builder) void {
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);
 
-    // Benchmark: shard
-    const benchmark_shard_exe = b.addExecutable("benchmark_shard", "src/shard_benchmark.zig");
-    benchmark_shard_exe.addPackage(pkg);
-    benchmark_shard_exe.addPackage(fastfilter.pkg);
-    benchmark_shard_exe.setBuildMode(.ReleaseFast);
-    benchmark_shard_exe.install();
+    // Benchmark: filter
+    const benchmark_filter_exe = b.addExecutable("benchmark_filter", "src/filter_benchmark.zig");
+    benchmark_filter_exe.addPackage(pkg);
+    benchmark_filter_exe.addPackage(fastfilter.pkg);
+    benchmark_filter_exe.setBuildMode(.ReleaseFast);
+    benchmark_filter_exe.install();
 
-    const benchmark_shard_run_cmd = benchmark_shard_exe.run();
-    benchmark_shard_run_cmd.step.dependOn(&benchmark_shard_exe.install_step.?.step);
+    const benchmark_filter_run_cmd = benchmark_filter_exe.run();
+    benchmark_filter_run_cmd.step.dependOn(&benchmark_filter_exe.install_step.?.step);
 
-    const benchmark_shard_run_step = b.step("run-benchmark-shard", "Run benchmark_shard");
-    benchmark_shard_run_step.dependOn(&benchmark_shard_run_cmd.step);
+    const benchmark_filter_run_step = b.step("run-benchmark-filter", "Run benchmark_filter");
+    benchmark_filter_run_step.dependOn(&benchmark_filter_run_cmd.step);
 }
 
 pub const pkg = std.build.Pkg{

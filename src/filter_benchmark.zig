@@ -1,4 +1,4 @@
-// zig run -O ReleaseFast ./src/shard_benchmark.zig
+// zig build run-benchmark-filter
 
 const sinter = @import("sinter");
 const fastfilter = @import("fastfilter");
@@ -29,20 +29,20 @@ pub fn main() !void {
     const Iterator = fastfilter.SliceIterator(u64);
     var keys_iter = Iterator.init(keys);
 
-    // Measure shard creation.
+    // Measure filter creation.
     var timer = try time.Timer.start();
-    const TestShard = sinter.Shard(.{}, u64, *Iterator);
+    const TestFilter = sinter.Filter(.{}, u64, *Iterator);
 
-    // Create, insert (extremely cheap - not worth measuring), and index the shard.
+    // Create, insert (extremely cheap - not worth measuring), and index the filter.
     const estimated_keys = num_results * num_keys_per_result;
     const indexTimeStart = timer.lap();
-    var shard = TestShard.init(estimated_keys);
-    defer shard.deinit(buildAllocator);
+    var filter = TestFilter.init(estimated_keys);
+    defer filter.deinit(buildAllocator);
     var result: u64 = 0;
     while (result < num_results) : (result += 1) {
-        try shard.insert(buildAllocator, &keys_iter, result);
+        try filter.insert(buildAllocator, &keys_iter, result);
     }
-    try shard.index(buildAllocator);
+    try filter.index(buildAllocator);
     const indexTimeEnd = timer.lap();
 
     // Choose random keys we will use to query.
@@ -53,7 +53,7 @@ pub fn main() !void {
         i.* = random.uintAtMost(u64, num_keys_per_result);
     }
 
-    // Query the shard.
+    // Query the filter.
     const query_laps = 100_000;
     var results = std.ArrayListUnmanaged(u64){};
     defer results.deinit(gpa);
@@ -62,7 +62,7 @@ pub fn main() !void {
     var i: usize = 0;
     while (i < query_laps) : (i += 1) {
         results.clearRetainingCapacity();
-        _ = try shard.queryLogicalOr(gpa, query_keys[0..], *std.ArrayListUnmanaged(u64), &results);
+        _ = try filter.queryLogicalOr(gpa, query_keys[0..], *std.ArrayListUnmanaged(u64), &results);
     }
     const queryOrTimeEnd = timer.lap();
 
@@ -70,16 +70,16 @@ pub fn main() !void {
     i = 0;
     while (i < query_laps) : (i += 1) {
         results.clearRetainingCapacity();
-        _ = try shard.queryLogicalAnd(gpa, query_keys[0..], *std.ArrayListUnmanaged(u64), &results);
+        _ = try filter.queryLogicalAnd(gpa, query_keys[0..], *std.ArrayListUnmanaged(u64), &results);
     }
     const queryAndTimeEnd = timer.lap();
 
     const writeFileTimeStart = timer.lap();
-    try shard.writeFile(gpa, std.fs.cwd(), "benchmark.sinter");
+    try filter.writeFile(gpa, std.fs.cwd(), "benchmark.sinter");
     const writeFileTimeEnd = timer.lap();
 
     const readFileTimeStart = timer.lap();
-    _ = try TestShard.readFile(gpa, "benchmark.sinter");
+    _ = try TestFilter.readFile(gpa, "benchmark.sinter");
     const readFileTimeEnd = timer.lap();
 
     const stdout = std.io.getStdOut().writer();

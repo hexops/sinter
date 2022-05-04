@@ -1,9 +1,9 @@
 const std = @import("std");
 const testing = std.testing;
 
-pub const shard = @import("shard.zig");
-pub const Shard = shard.Shard;
+pub const filter = @import("filter.zig");
+pub const Filter = filter.Filter;
 
 test {
-    _ = Shard;
+    _ = Filter;
 }

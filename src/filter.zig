@@ -3,7 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
-/// Comptime options for a shard.
+/// Comptime options for a sinter filter.
 const Options = struct {
     /// The binary fuse filter bit size. Either 8, 16, or 32. A higher bit size like 16 could be
     /// useful if false positive matches have a very high penalty for your use case (bitsize of 8
@@ -15,49 +15,78 @@ const Options = struct {
     layer1_divisions: usize = 8,
 };
 
-/// A shard is the smallest logical representation of a sinter filter. They are designed to be
-/// relatively even in the amount of data they represent, live on a single physical machine, and be
-/// operated on within a single CPU core. Multiple shards are typically used to distribute across
-/// multiple cores and machines.
+/// A sinter filter. They are designed to represent many matching keys (integers, e.g. hashes of
+/// words in a text file) which map to a smaller number of results (for example, the text files
+/// themselves.) The filter is composed of a 3-layer tree of binary fuse filters, and optimized for
+/// query time. Binary fuse filters are a much faster more modern variant of bloom filters by Daniel
+/// Lemire and Thomas Mueller Graf, see https://github.com/hexops/fastfilter for details.
 ///
-/// A shard contains keys (e.g. trigram strings to match) and results (e.g. the files those
-/// trigrams came from.) It's advised that you keep shards at around ~100,000,000 keys in total.
+/// Querying results from a sinter filter is as easy as providing matching keys. Key equality is
+/// exact only, you can acquire "fuzzy" matching of results by e.g. emitting a single key for every
+/// string you might want to match. To query, you provide a set of keys that should logically AND/OR
+/// intersect with results' keys.
 ///
-/// The shard is represented in three layers (all perf measured on Ryzen 9 3900X w/ 100 million
+/// A sinter filter is designed to be built, indexed, and queried within a single CPU core. You
+/// should look at the indexing time, memory usage, query time, and based on those numbers decide
+/// how much data on average to aim to pack into a single sinter filter so that you saturate about
+/// half of a CPU core reasonably. A FilterGroup can then be used to operate on multiple sinter
+/// filters in parallel across CPU cores. Multiple FilterGroups are typically distributed across
+/// physical machines when desirable.
+///
+/// `zig run-benchmark-filter` shows how efficient sinter filters can be. On an original M1 Macbook
+/// Pro, utilizing a single CPU:
+///
+/// ```
+/// | # keys    | # results | # keys per result | index time | OR-200 query time | AND-200 query time | writeFile time | readFile time |
+/// |-----------|-----------|-------------------|------------|-------------------|--------------------|----------------|---------------|
+/// | 100000000 | 200       | 500000            |    22.4s   |         2825.0ns  |        415755.0ns  |        91.0ms  |      667.1ms  |
+/// ```
+///
+/// That can be read as:
+///
+/// * We put 200 results into the filter, each with 500,000 unique matching keys.
+/// * The filter contains 100,000,000 unique matching keys total.
+/// * We can query "which results contain one of these 200 keys? (OR)" in 2825ns
+/// * We can query "which results contain ALL 200 of these keys? (AND)" in 0.41ms (415755.0ns)
+/// * Serialization and deserialization (including writing to disk) takes under a few hundred ms, 324M on disk file size.
+///
+/// How sinter filters are structured
+///
+/// The filter is represented in three layers (all perf measured on Ryzen 9 3900X w/ 100 million
 /// keys):
 ///
 /// - layer0: the topmost fastfilter which is capable of determining if a given key is present in
-///   any result within the shard. e.g. if a trigram is present in any of the 200 files (assuming
-///   200 files is about 100,000,000 trigrams/keys.)
+///   any result within the entire filter. e.g. if a word is present in any of the 200 files (assuming
+///   200 files is about 100,000,000 words/keys.)
 ///     - Indexing: 2 GiB / 6.9s
 ///     - Filter size: 107 MiB
 ///     - Query speed: 167ns
 /// - layer1: A configurable number of fastfilters, which divide layer0 into N sets (typically 8.)
-///   e.g. while layer0 says "this trigram is in one of these 200 files", layer1 says "it's in one
+///   e.g. while layer0 says "this word is in one of these 200 files", layer1 says "it's in one
 ///   of these 25 files"
 ///     - Indexing: 225 MiB / 572.3ms (per set)
 ///     - Filter size: 10 MiB (per set)
 ///     - Query speed: 33ns (per set)
 /// - layer2: the lowest level fastfilter which represents whether or not a given key is present in
-///   a final result. e.g. layer2 says "this trigram is in this file" concretely.
+///   a final result. e.g. layer2 says "this word is in this file" concretely.
 ///     - Indexing: <22 MiB / <44.6ms
 ///     - Filter size: <1 MiB
 ///     - Query speed: <24ns
 ///
-/// For example, assuming you have 200 files with 100,000,000 trigrams/keys total, then performance
-/// could be estimated on a single core / single shard to be:
+/// For example, assuming you have 200 files with 100,000,000 words/keys total, then performance
+/// could be estimated on a single sinter filter (single CPU core) to be:
 ///
 /// - Indexing peak mem: ~2 GiB
 /// - Indexing time: 20.4s (6.9s layer0, 4.6s layer1, 8.9s layer2)
 /// - Query (best case): 224ns (167ns layer0, 33ns layer1, 24ns layer2)
 /// - Query (worst case): 1031ns (167ns layer0, 33ns*8 layer1, 24ns*25 layer2)
 ///
-pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator: type) type {
+pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterator: type) type {
     return struct {
-        /// The original estimated number of keys in this shard.
+        /// The original estimated number of keys in this filter.
         total_keys_estimate: usize,
 
-        /// Total number of keys within this shard.
+        /// Total number of keys within this filter.
         keys: usize = 0,
 
         /// null until .index() is invoked.
@@ -89,7 +118,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
 
         const Self = @This();
 
-        /// Initializes the shard with an approximate number of keys that the shard overall is
+        /// Initializes the filter with an approximate number of keys that the filter overall is
         /// expected to contain (e.g. 100_000_000) and estimated number of keys per entry (e.g. 500_000)
         /// which will be used to balance layer1 divisions and keep them at generally equal amounts
         /// of keys.
@@ -115,7 +144,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
         /// would be an iterator for hashes of the files trigrams. See fastfilter.SliceIterator
         ///
         /// The iterator must remain alive at least until .index() is called.
-        pub fn insert(shard: *Self, allocator: Allocator, keys_iter: Iterator, result: Result) !void {
+        pub fn insert(filter: *Self, allocator: Allocator, keys_iter: Iterator, result: Result) !void {
             const keys_len = keys_iter.len();
             const entry = Entry{
                 .keys = keys_len,
@@ -128,8 +157,8 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             // distributed division based on number of keys.
             var target_division: usize = keys_len % options.layer1_divisions;
 
-            const target_keys_per_division = shard.total_keys_estimate / options.layer1_divisions;
-            for (shard.layer1) |division, division_index| {
+            const target_keys_per_division = filter.total_keys_estimate / options.layer1_divisions;
+            for (filter.layer1) |division, division_index| {
                 if (division.keys + entry.keys >= target_keys_per_division) continue;
 
                 // Found a division we can place it into.
@@ -137,36 +166,36 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
                 break;
             }
 
-            shard.keys += entry.keys;
-            shard.layer1[target_division].keys += entry.keys;
-            try shard.layer1[target_division].entries.append(allocator, entry);
+            filter.keys += entry.keys;
+            filter.layer1[target_division].keys += entry.keys;
+            try filter.layer1[target_division].entries.append(allocator, entry);
         }
 
-        /// Iterates every key in a shard.
+        /// Iterates every key in a filter.
         const AllKeysIter = struct {
-            shard: *Self,
+            filter: *Self,
             layer2: usize = 0,
             entry: usize = 0,
             iter: ?Iterator = null,
 
             pub inline fn next(iter: *@This()) ?u64 {
                 if (iter.iter == null) {
-                    if (iter.shard.layer1[iter.layer2].entries.len == 0) return null;
-                    iter.iter = iter.shard.layer1[iter.layer2].entries.get(0).keys_iter.?;
+                    if (iter.filter.layer1[iter.layer2].entries.len == 0) return null;
+                    iter.iter = iter.filter.layer1[iter.layer2].entries.get(0).keys_iter.?;
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
-                    if (iter.entry == iter.shard.layer1[iter.layer2].entries.len - 1) {
-                        if (iter.layer2 == iter.shard.layer1.len - 1) return null; // no further layer2's
+                    if (iter.entry == iter.filter.layer1[iter.layer2].entries.len - 1) {
+                        if (iter.layer2 == iter.filter.layer1.len - 1) return null; // no further layer2's
                         // Next layer2.
                         iter.layer2 += 1;
                         iter.entry = 0;
-                        if (iter.shard.layer1[iter.layer2].entries.len == 0) return null;
-                        iter.iter = iter.shard.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
+                        if (iter.filter.layer1[iter.layer2].entries.len == 0) return null;
+                        iter.iter = iter.filter.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
                         final = iter.iter.?.next();
                     } else {
                         iter.entry += 1;
-                        iter.iter = iter.shard.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
+                        iter.iter = iter.filter.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
                         final = iter.iter.?.next();
                     }
                 }
@@ -174,29 +203,29 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             }
 
             pub inline fn len(iter: @This()) usize {
-                return iter.shard.keys;
+                return iter.filter.keys;
             }
         };
 
         /// Iterates every key in layer2 / a single division of layer1.
         const Layer2Iterator = struct {
-            shard: *Self,
+            filter: *Self,
             layer2: usize,
             entry: usize = 0,
             iter: ?Iterator = null,
 
             pub inline fn next(iter: *@This()) ?u64 {
                 if (iter.iter == null) {
-                    if (iter.shard.layer1[iter.layer2].entries.len == 0) return null;
-                    iter.iter = iter.shard.layer1[iter.layer2].entries.get(0).keys_iter.?;
+                    if (iter.filter.layer1[iter.layer2].entries.len == 0) return null;
+                    iter.iter = iter.filter.layer1[iter.layer2].entries.get(0).keys_iter.?;
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
-                    if (iter.entry == iter.shard.layer1[iter.layer2].entries.len - 1) {
+                    if (iter.entry == iter.filter.layer1[iter.layer2].entries.len - 1) {
                         return null;
                     } else {
                         iter.entry += 1;
-                        iter.iter = iter.shard.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
+                        iter.iter = iter.filter.layer1[iter.layer2].entries.get(iter.entry).keys_iter.?;
                         final = iter.iter.?.next();
                     }
                 }
@@ -204,28 +233,28 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             }
 
             pub inline fn len(iter: @This()) usize {
-                return iter.shard.keys;
+                return iter.filter.keys;
             }
         };
 
-        /// Indexes the shard, populating all of the fastfilters using the key iterators of the
+        /// Indexes the filter, populating all of the fastfilters using the key iterators of the
         /// entries. Must be performed once finished inserting entries. Can be called again to
-        /// update the shard (although this performs a full rebuild.)
-        pub fn index(shard: *Self, allocator: Allocator) !void {
+        /// update the filter (although this performs a full rebuild.)
+        pub fn index(filter: *Self, allocator: Allocator) !void {
             // Populate layer0 with all keys.
-            var all_keys_iter = AllKeysIter{ .shard = shard };
-            shard.layer0 = try BinaryFuseFilter.init(allocator, shard.keys);
-            try shard.layer0.?.populateIter(allocator, &all_keys_iter);
+            var all_keys_iter = AllKeysIter{ .filter = filter };
+            filter.layer0 = try BinaryFuseFilter.init(allocator, filter.keys);
+            try filter.layer0.?.populateIter(allocator, &all_keys_iter);
 
             // Populate each layer2 filter, with their division of keys.
-            for (shard.layer1) |*layer2, layer2_index| {
-                var layer2_iter = Layer2Iterator{ .shard = shard, .layer2 = layer2_index };
+            for (filter.layer1) |*layer2, layer2_index| {
+                var layer2_iter = Layer2Iterator{ .filter = filter, .layer2 = layer2_index };
                 layer2.filter = try BinaryFuseFilter.init(allocator, layer2.keys);
                 try layer2.filter.?.populateIter(allocator, &layer2_iter);
             }
 
             // Populate each entry filter.
-            for (shard.layer1) |*layer2| {
+            for (filter.layer1) |*layer2| {
                 var i: usize = 0;
                 while (i < layer2.entries.len) : (i += 1) {
                     var entry = layer2.entries.get(i);
@@ -236,9 +265,9 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             }
         }
 
-        pub fn deinit(shard: *Self, allocator: Allocator) void {
-            if (shard.layer0) |*layer0| layer0.deinit(allocator);
-            for (shard.layer1) |*layer2| {
+        pub fn deinit(filter: *Self, allocator: Allocator) void {
+            if (filter.layer0) |*layer0| layer0.deinit(allocator);
+            for (filter.layer1) |*layer2| {
                 if (layer2.filter) |*layer2_filter| layer2_filter.deinit(allocator);
                 for (layer2.entries.items(.filter)) |entry_data| {
                     if (entry_data) |*entry_filter| entry_filter.deinit(allocator);
@@ -247,20 +276,20 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             }
         }
 
-        /// reports if the specified key is likely contained by the shard (within the set
+        /// reports if the specified key is likely contained by the filter (within the set
         /// false-positive rate.)
-        pub inline fn contains(shard: *const Self, key: u64) bool {
-            return shard.layer0.?.contain(key);
+        pub inline fn contains(filter: *const Self, key: u64) bool {
+            return filter.layer0.?.contain(key);
         }
 
-        /// Queries for results from the shard, returning results for entries that likely match one
+        /// Queries for results from the filter, returning results for entries that likely match one
         /// of the keys in `or_keys`.
         ///
         /// Returns the number of results found.
-        pub inline fn queryLogicalOr(shard: *Self, allocator: Allocator, or_keys: []const u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
+        pub inline fn queryLogicalOr(filter: *Self, allocator: Allocator, or_keys: []const u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
             var any = blk: {
                 for (or_keys) |key| {
-                    if (shard.layer0.?.contain(key)) {
+                    if (filter.layer0.?.contain(key)) {
                         break :blk true;
                     }
                 }
@@ -269,7 +298,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             if (!any) return 0;
 
             var results: usize = 0;
-            for (shard.layer1) |*layer2| {
+            for (filter.layer1) |*layer2| {
                 var layer1 = layer2.filter.?;
                 any = blk: {
                     for (or_keys) |key| {
@@ -299,14 +328,14 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             return results;
         }
 
-        /// Queries for results from the shard, returning results for entries that likely match all
+        /// Queries for results from the filter, returning results for entries that likely match all
         /// of the keys in `and_keys`.
         ///
         /// Returns the number of results found.
-        pub inline fn queryLogicalAnd(shard: *Self, allocator: Allocator, and_keys: []const u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
+        pub inline fn queryLogicalAnd(filter: *Self, allocator: Allocator, and_keys: []const u64, comptime ResultsDst: type, dst: ?ResultsDst) !usize {
             var all = blk: {
                 for (and_keys) |key| {
-                    if (!shard.layer0.?.contain(key)) {
+                    if (!filter.layer0.?.contain(key)) {
                         break :blk false;
                     }
                 }
@@ -315,7 +344,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             if (!all) return 0;
 
             var results: usize = 0;
-            for (shard.layer1) |*layer2| {
+            for (filter.layer1) |*layer2| {
                 var layer1 = layer2.filter.?;
                 all = blk: {
                     for (and_keys) |key| {
@@ -345,10 +374,10 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             return results;
         }
 
-        pub fn sizeInBytes(shard: *const Self) usize {
+        pub fn sizeInBytes(filter: *const Self) usize {
             var size: usize = @sizeOf(Self);
-            if (shard.layer0) |layer0_filter| size += layer0_filter.sizeInBytes();
-            for (shard.layer1) |*layer2| {
+            if (filter.layer0) |layer0_filter| size += layer0_filter.sizeInBytes();
+            for (filter.layer1) |*layer2| {
                 if (layer2.filter) |layer2_filter| size += layer2_filter.sizeInBytes();
                 for (layer2.entries.items(.filter)) |entry_filter| {
                     if (entry_filter) |f| size += f.sizeInBytes();
@@ -359,7 +388,7 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
         }
 
         pub fn writeFile(
-            shard: *const Self,
+            filter: *const Self,
             allocator: Allocator,
             dir: std.fs.Dir,
             dest_path: []const u8,
@@ -367,22 +396,22 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
             const baf = try std.io.BufferedAtomicFile.create(allocator, dir, dest_path, .{});
             defer baf.destroy();
 
-            try shard.serialize(baf.writer());
+            try filter.serialize(baf.writer());
             try baf.finish();
         }
 
-        pub fn serialize(shard: *const Self, stream: anytype) !void {
+        pub fn serialize(filter: *const Self, stream: anytype) !void {
             // Constants
             const version = 1;
             try stream.writeIntLittle(u16, version);
-            try stream.writeIntLittle(u64, shard.total_keys_estimate);
+            try stream.writeIntLittle(u64, filter.total_keys_estimate);
             try stream.writeIntLittle(u16, options.filter_bit_size);
             try stream.writeIntLittle(u64, options.layer1_divisions);
 
             // Layer0
-            try stream.writeIntLittle(u64, shard.keys);
-            try serializeFilter(stream, &shard.layer0.?);
-            for (shard.layer1) |*layer2| {
+            try stream.writeIntLittle(u64, filter.keys);
+            try serializeFilter(stream, &filter.layer0.?);
+            for (filter.layer1) |*layer2| {
                 // Layer1
                 try stream.writeIntLittle(u64, layer2.keys);
                 try serializeFilter(stream, &layer2.filter.?);
@@ -510,32 +539,32 @@ pub fn Shard(comptime options: Options, comptime Result: type, comptime Iterator
     };
 }
 
-test "shard" {
+test "filter" {
     const allocator = testing.allocator;
 
     const Iterator = fastfilter.SliceIterator(u64);
-    const TestShard = Shard(.{}, []const u8, *Iterator);
+    const TestFilter = Filter(.{}, []const u8, *Iterator);
 
     const estimated_keys = 100;
-    var shard = TestShard.init(estimated_keys);
-    defer shard.deinit(allocator);
+    var filter = TestFilter.init(estimated_keys);
+    defer filter.deinit(allocator);
 
     // Insert files.
     var keys_iter = Iterator.init(&.{ 1, 2, 3, 4 });
-    try shard.insert(allocator, &keys_iter, "1-2-3-4");
+    try filter.insert(allocator, &keys_iter, "1-2-3-4");
 
     var keys_iter_2 = Iterator.init(&.{ 3, 4, 5 });
-    try shard.insert(allocator, &keys_iter_2, "3-4-5");
+    try filter.insert(allocator, &keys_iter_2, "3-4-5");
 
     var keys_iter_3 = Iterator.init(&.{ 6, 7, 8 });
-    try shard.insert(allocator, &keys_iter_3, "6-7-8");
+    try filter.insert(allocator, &keys_iter_3, "6-7-8");
 
     // Index.
-    try shard.index(allocator);
+    try filter.index(allocator);
 
     // Super fast containment checks.
-    try testing.expectEqual(true, shard.contains(2));
-    try testing.expectEqual(true, shard.contains(4));
+    try testing.expectEqual(true, filter.contains(2));
+    try testing.expectEqual(true, filter.contains(4));
 
     // Fast queries.
     var results = std.ArrayListUnmanaged([]const u8){};
@@ -543,30 +572,30 @@ test "shard" {
 
     // Query a single key (5).
     results.clearRetainingCapacity();
-    _ = try shard.queryLogicalOr(allocator, &.{5}, *std.ArrayListUnmanaged([]const u8), &results);
+    _ = try filter.queryLogicalOr(allocator, &.{5}, *std.ArrayListUnmanaged([]const u8), &results);
     try testing.expectEqual(@as(usize, 1), results.items.len);
     try testing.expectEqualStrings("3-4-5", results.items[0]);
 
     // Query logical OR (2, 5)
     results.clearRetainingCapacity();
-    _ = try shard.queryLogicalOr(allocator, &.{ 2, 5 }, *std.ArrayListUnmanaged([]const u8), &results);
+    _ = try filter.queryLogicalOr(allocator, &.{ 2, 5 }, *std.ArrayListUnmanaged([]const u8), &results);
     try testing.expectEqual(@as(usize, 2), results.items.len);
     try testing.expectEqualStrings("1-2-3-4", results.items[0]);
     try testing.expectEqualStrings("3-4-5", results.items[1]);
 
     // Query logical AND (2, 5)
     results.clearRetainingCapacity();
-    _ = try shard.queryLogicalAnd(allocator, &.{ 2, 5 }, *std.ArrayListUnmanaged([]const u8), &results);
+    _ = try filter.queryLogicalAnd(allocator, &.{ 2, 5 }, *std.ArrayListUnmanaged([]const u8), &results);
     try testing.expectEqual(@as(usize, 0), results.items.len);
 
     // Query logical AND (3, 4)
     results.clearRetainingCapacity();
-    _ = try shard.queryLogicalAnd(allocator, &.{ 3, 4 }, *std.ArrayListUnmanaged([]const u8), &results);
+    _ = try filter.queryLogicalAnd(allocator, &.{ 3, 4 }, *std.ArrayListUnmanaged([]const u8), &results);
     try testing.expectEqual(@as(usize, 2), results.items.len);
     try testing.expectEqualStrings("1-2-3-4", results.items[0]);
     try testing.expectEqualStrings("3-4-5", results.items[1]);
 
-    try testing.expectEqual(@as(usize, 1676), shard.sizeInBytes());
+    try testing.expectEqual(@as(usize, 1676), filter.sizeInBytes());
 }
 
 // TODO: serialization/deserialization tests
