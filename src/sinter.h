@@ -78,7 +78,7 @@ typedef enum SinterError {
 SINTER_EXPORT SinterError sinterFilterInit(uint64_t estimated_keys, SinterFilter* out);
 SINTER_EXPORT void sinterFilterDeinit(SinterFilter f);
 
-typedef bool (*SinterIteratorCallback)(uint64_t* out);
+typedef uint64_t (*SinterIteratorCallback)(uint64_t* out_write_max_100k);
 SINTER_EXPORT SinterError sinterFilterInsert(
     SinterFilter f,
     SinterIteratorCallback callback,

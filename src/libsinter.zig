@@ -3,18 +3,35 @@ const sinter = @import("main.zig");
 
 const SinterFilter = *anyopaque;
 
+const SinterFilterImpl = struct {
+    filter: CFilterType,
+    iterator_buf: [100_000]u64 = undefined,
+};
+
 const CFilterType = sinter.Filter(.{}, []const u8, CCallbackIterator);
 
-const SinterIterator = fn (out: *u64) callconv(.C) bool;
+const SinterIterator = fn (out_write_max_100k: *u64) callconv(.C) u64;
 
 const CCallbackIterator = struct {
     callback: SinterIterator,
     length: usize,
+    buf: *[100_000]u64,
+    remaining: []u64,
 
     pub inline fn next(iter: *const CCallbackIterator) ?u64 {
-        var result: u64 = undefined;
-        if (iter.callback(&result)) return result;
-        return null;
+        if (iter.remaining.len > 0) {
+            var v = iter.remaining[0];
+            iter.remaining = iter.remaining[1..];
+            return v;
+        }
+
+        var written = iter.callback(iter.buf);
+        if (written == 0) {
+            return null;
+        }
+        var v = iter.buf[0];
+        iter.remaining = iter.buf[1..written];
+        return v;
     }
 
     pub inline fn len(iter: *const CCallbackIterator) usize {
@@ -24,30 +41,37 @@ const CCallbackIterator = struct {
 
 export fn sinterFilterInit(estimated_keys: u64, out: *SinterFilter) SinterError {
     const allocator = std.heap.c_allocator;
-    const ptr = allocator.create(CFilterType) catch return SinterError.OutOfMemory;
-    ptr.* = CFilterType.init(@intCast(usize, estimated_keys));
+    const ptr = allocator.create(SinterFilterImpl) catch return SinterError.OutOfMemory;
+    errdefer allocator.destroy(ptr);
+    ptr.* = SinterFilterImpl{
+        .filter = CFilterType.init(@intCast(usize, estimated_keys)),
+    };
     out.* = ptr;
     return SinterError.None;
 }
 
 export fn sinterFilterDeinit(c_filter: SinterFilter) void {
     const allocator = std.heap.c_allocator;
-    const filter = @ptrCast(*CFilterType, @alignCast(@alignOf(CFilterType), c_filter));
+    const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
     filter.deinit(allocator);
     allocator.destroy(filter);
 }
 
 export fn sinterFilterInsert(c_filter: SinterFilter, callback: SinterIterator, len: u64, result: [*]const u8, result_len: u64) SinterError {
     const allocator = std.heap.c_allocator;
-    const filter = @ptrCast(*CFilterType, @alignCast(@alignOf(CFilterType), c_filter));
-    const iter = CCallbackIterator{ .callback = callback, .length = @intCast(usize, len) };
+    const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
+    const iter = CCallbackIterator{
+        .callback = callback,
+        .length = @intCast(usize, len),
+        .iterator_buf = &filter.iterator_buf,
+    };
     filter.insert(allocator, iter, result[0..result_len]) catch |err| return errorToCError(err);
     return SinterError.None;
 }
 
 export fn sinterFilterIndex(c_filter: SinterFilter) SinterError {
     const allocator = std.heap.c_allocator;
-    const filter = @ptrCast(*CFilterType, @alignCast(@alignOf(CFilterType), c_filter));
+    const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
     filter.index(allocator) catch |err| return switch (err) {
         error.OutOfMemory => SinterError.OutOfMemory,
         error.KeysLikelyNotUnique => unreachable,
@@ -58,8 +82,8 @@ export fn sinterFilterIndex(c_filter: SinterFilter) SinterError {
 export fn sinterFilterReadFile(file_path: [*:0]const u8, out: *SinterFilter) SinterError {
     const allocator = std.heap.c_allocator;
     const filter = CFilterType.readFile(allocator, std.mem.span(file_path)) catch |err| return errorToCError(err);
-    const ptr = allocator.create(CFilterType) catch return SinterError.OutOfMemory;
-    ptr.* = filter;
+    const ptr = allocator.create(SinterFilterImpl) catch return SinterError.OutOfMemory;
+    ptr.* = SinterFilterImpl{.filter = filter};
     out.* = ptr;
     return SinterError.None;
 }
@@ -70,7 +94,7 @@ export fn sinterFilterWriteFile(c_filter: SinterFilter, file_path: [*:0]const u8
     const path = std.fs.cwd().realpathAlloc(allocator, std.mem.span(file_path)) catch |err| return errorToCError(err);
     defer allocator.free(path);
 
-    const filter = @ptrCast(*CFilterType, @alignCast(@alignOf(CFilterType), c_filter));
+    const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
     filter.writeFile(allocator, std.fs.cwd(), path) catch |err| return errorToCError(err);
     return SinterError.None;
 }
