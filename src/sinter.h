@@ -83,16 +83,16 @@ SINTER_EXPORT SinterError sinterFilterInsert(
     SinterFilter f,
     SinterIteratorCallback callback,
     uint64_t len,
-    char** result,
+    char* result,
     uint64_t result_len
 );
 
 SINTER_EXPORT SinterError sinterFilterIndex(SinterFilter f);
 
-SINTER_EXPORT SinterError sinterFilterReadFile(char** file_path, SinterFilter* out);
-SINTER_EXPORT SinterError sinterFilterWriteFile(SinterFilter f, char** file_path);
+SINTER_EXPORT SinterError sinterFilterReadFile(char* file_path, SinterFilter* out);
+SINTER_EXPORT SinterError sinterFilterWriteFile(SinterFilter f, char* file_path);
 
-SINTER_EXPORT char** sinterErrorName(SinterError err);
+SINTER_EXPORT char* sinterErrorName(SinterError err);
 
 #ifdef __cplusplus
 } // extern "C"
