@@ -453,7 +453,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             allocator: Allocator,
             file_path: []const u8,
         ) !Self {
-            var file = try std.fs.openFileAbsolute(file_path, .{ .mode = .read_only });
+            var file = try std.fs.cwd().openFile(file_path, .{ .mode = .read_only });
             defer file.close();
 
             var buf_stream = std.io.bufferedReader(file.reader());

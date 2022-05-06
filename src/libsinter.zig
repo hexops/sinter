@@ -103,8 +103,10 @@ export fn sinterFilterIndex(c_filter: SinterFilter) SinterError {
 export fn sinterFilterReadFile(file_path: [*:0]const u8, out: *SinterFilter) SinterError {
     const allocator = std.heap.c_allocator;
     const filter = CFilterType.readFile(allocator, std.mem.span(file_path)) catch |err| return errorToCError(err);
+    errdefer filter.deinit(allocator);
     const ptr = allocator.create(SinterFilterImpl) catch return SinterError.OutOfMemory;
-    ptr.* = SinterFilterImpl{.filter = filter};
+    errdefer allocator.destroy(ptr);
+    ptr.* = SinterFilterImpl{ .filter = filter };
     out.* = ptr;
     return SinterError.None;
 }
