@@ -78,13 +78,14 @@ typedef enum SinterError {
 SINTER_EXPORT SinterError sinterFilterInit(uint64_t estimated_keys, SinterFilter* out);
 SINTER_EXPORT void sinterFilterDeinit(SinterFilter f);
 
-typedef uint64_t (*SinterIteratorCallback)(uint64_t* out_write_max_100k);
+typedef uint64_t (*SinterIteratorCallback)(SinterFilter f, uint64_t* out_write_max_100k, void* userdata);
 SINTER_EXPORT SinterError sinterFilterInsert(
     SinterFilter f,
     SinterIteratorCallback callback,
     uint64_t len,
     char* result,
-    uint64_t result_len
+    uint64_t result_len,
+    void* userdata
 );
 
 SINTER_EXPORT SinterError sinterFilterIndex(SinterFilter f);
