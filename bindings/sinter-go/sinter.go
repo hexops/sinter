@@ -12,6 +12,7 @@ import "C"
 
 import (
 	"errors"
+	"reflect"
 	"unsafe"
 )
 
@@ -51,6 +52,7 @@ func (s *SliceIterator) Next() ([]uint64, bool) {
 		s.remaining = s.Slice
 	}
 	if len(s.remaining) == 0 {
+		s.remaining = s.Slice // wrap around
 		return nil, false
 	}
 
@@ -62,7 +64,7 @@ func (s *SliceIterator) Next() ([]uint64, bool) {
 
 	v := s.remaining[0:maxSize]
 	s.remaining = s.remaining[maxSize:]
-	return v, false
+	return v, true
 }
 
 func (s *SliceIterator) Len() uint64 {
@@ -107,8 +109,8 @@ func sinterGoIteratorCallback(filter C.SinterFilter, outWriteMax100k *uint64, us
 	if len(keys) > 100_000 {
 		panic("sinter: illegal sinter.Iterator returned >100,000 keys")
 	}
-	for _, k := range keys {
-		dst := (*uint64)(unsafe.Add(unsafe.Pointer(outWriteMax100k), 1))
+	for i, k := range keys {
+		dst := (*uint64)(unsafe.Add(unsafe.Pointer(outWriteMax100k), i*8))
 		*dst = k
 	}
 	return uint64(len(keys))
@@ -122,6 +124,79 @@ func (f Filter) WriteFile(file_path string) error {
 	cs := C.CString(file_path + "\x00")
 	defer C.free(unsafe.Pointer(cs))
 	return goError(C.sinterFilterWriteFile(f.ptr, cs))
+}
+
+func (f Filter) Contains(key uint64) bool {
+	return C.sinterFilterContains(f.ptr, C.uint64_t(key)) == true
+}
+
+func (f Filter) SizeinBytes() uint64 {
+	return uint64(C.sinterFilterSizeInBytes(f.ptr))
+}
+
+type FilterResults struct {
+	ptr C.SinterFilterResults
+}
+
+func (r FilterResults) Len() int {
+	return int(C.sinterFilterResultsLen(r.ptr))
+}
+
+func (r FilterResults) Index(index int) []byte {
+	header := reflect.StringHeader{
+		Data: uintptr(unsafe.Pointer(C.sinterFilterResultsIndexGet(r.ptr, C.uint64_t(index)))),
+		Len:  int(C.sinterFilterResultsIndexLen(r.ptr, C.uint64_t(index))),
+	}
+	ptr := (*string)(unsafe.Pointer(&header))
+	return []byte(*ptr)
+}
+
+func (r FilterResults) Deinit() {
+	C.sinterFilterResultsDeinit(r.ptr)
+}
+
+func (f Filter) QueryLogicalOr(keys []uint64) (FilterResults, error) {
+	var out C.SinterFilterResults
+	err := C.sinterFilterQueryLogicalOr(
+		(*C.struct_SinterFilterImpl)(unsafe.Pointer(f.ptr)),
+		(*C.uint64_t)(unsafe.Pointer(&keys[0])),
+		C.uint64_t(len(keys)),
+		&out,
+	)
+	return FilterResults{ptr: out}, goError(err)
+}
+
+func (f Filter) QueryLogicalAnd(keys []uint64) (FilterResults, error) {
+	var out C.SinterFilterResults
+	err := C.sinterFilterQueryLogicalAnd(
+		(*C.struct_SinterFilterImpl)(unsafe.Pointer(f.ptr)),
+		(*C.uint64_t)(unsafe.Pointer(&keys[0])),
+		C.uint64_t(len(keys)),
+		&out,
+	)
+	return FilterResults{ptr: out}, goError(err)
+}
+
+func (f Filter) QueryLogicalOrNumResults(keys []uint64) (uint64, error) {
+	var out C.uint64_t
+	err := C.sinterFilterQueryLogicalOrNumResults(
+		(*C.struct_SinterFilterImpl)(unsafe.Pointer(f.ptr)),
+		(*C.uint64_t)(unsafe.Pointer(&keys[0])),
+		C.uint64_t(len(keys)),
+		&out,
+	)
+	return uint64(out), goError(err)
+}
+
+func (f Filter) QueryLogicalAndNumResults(keys []uint64) (uint64, error) {
+	var out C.uint64_t
+	err := C.sinterFilterQueryLogicalAndNumResults(
+		(*C.struct_SinterFilterImpl)(unsafe.Pointer(f.ptr)),
+		(*C.uint64_t)(unsafe.Pointer(&keys[0])),
+		C.uint64_t(len(keys)),
+		&out,
+	)
+	return uint64(out), goError(err)
 }
 
 var ErrOutOfMemory = errors.New("out of memory")

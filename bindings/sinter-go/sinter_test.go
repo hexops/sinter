@@ -26,6 +26,16 @@ func TestFilter(t *testing.T) {
 
 	filter.Index()
 
+	assertEqual := func(a, b any) {
+		t.Helper()
+		if a != b {
+			t.Fatalf("assert failed: %v == %v", a, b)
+		}
+	}
+
+	assertEqual(filter.Contains(4), true)
+	originalSizeinBytes := filter.SizeinBytes()
+
 	path := "go-test.sinter"
 	if err := filter.WriteFile(path); err != nil {
 		t.Fatal(err)
@@ -35,5 +45,45 @@ func TestFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = read
+	defer read.Deinit()
+
+	assertEqual(read.Contains(4), true)
+	assertEqual(read.SizeinBytes(), originalSizeinBytes)
+
+	{
+		results, err := read.QueryLogicalAnd([]uint64{4, 10, 15})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer results.Deinit()
+		assertEqual(results.Len(), 200)
+		assertEqual(string(results.Index(0)), "Hello world!")
+	}
+
+	{
+		results, err := read.QueryLogicalOr([]uint64{10, 10928301982301982301})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer results.Deinit()
+		assertEqual(results.Len(), 200)
+		assertEqual(string(results.Index(0)), "Hello world!")
+	}
+
+	{
+		numResults, err := read.QueryLogicalAndNumResults([]uint64{4, 10, 15})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertEqual(numResults, uint64(200))
+	}
+
+	{
+		numResults, err := read.QueryLogicalOrNumResults([]uint64{10, 10928301982301982301})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertEqual(numResults, uint64(200))
+	}
+
 }
