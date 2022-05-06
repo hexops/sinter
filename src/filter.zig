@@ -426,11 +426,11 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                     try serializeFilter(stream, &inner_layer.filter.?);
 
                     // TODO: generic result serialization
-                    if (@TypeOf(Result) == u64) {
+                    if (Result == u64) {
                         try stream.writeIntLittle(u64, inner_layer.result);
-                    } else if (@TypeOf(Result) == []const u8) {
-                        try stream.writeIntLittle(u32, inner_layer.result.len);
-                        try stream.writeAll(inner_layer.result.len);
+                    } else if (Result == []const u8) {
+                        try stream.writeIntLittle(u32, @intCast(u32, inner_layer.result.len));
+                        try stream.writeAll(inner_layer.result);
                     } else unreachable;
                 }
             }
@@ -493,9 +493,9 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                     var inner_layer_filter = try deserializeFilter(allocator, stream);
 
                     // TODO: generic result deserialization
-                    var result = if (@TypeOf(Result) == u64) blk: {
+                    var result = if (Result == u64) blk: {
                         break :blk try stream.readIntLittle(u64);
-                    } else if (@TypeOf(Result) == []const u8) blk: {
+                    } else if (Result == []const u8) blk: {
                         const data_len = try stream.readIntLittle(u32);
                         const data = try allocator.alloc(u8, data_len);
                         const read_bytes = try stream.readAll(data);
