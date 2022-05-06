@@ -93,6 +93,40 @@ SINTER_EXPORT SinterError sinterFilterIndex(SinterFilter f);
 SINTER_EXPORT SinterError sinterFilterReadFile(char* file_path, SinterFilter* out);
 SINTER_EXPORT SinterError sinterFilterWriteFile(SinterFilter f, char* file_path);
 
+SINTER_EXPORT bool sinterFilterContains(SinterFilter f, uint64_t key);
+SINTER_EXPORT uint64_t sinterFilterSizeInBytes(SinterFilter f);
+
+typedef struct SinterFilterResultsImpl* SinterFilterResults;
+SINTER_EXPORT uint64_t sinterFilterResultsLen(SinterFilterResults f);
+SINTER_EXPORT uint64_t sinterFilterResultsIndexLen(SinterFilterResults f, uint64_t index);
+SINTER_EXPORT char* sinterFilterResultsIndexGet(SinterFilterResults f, uint64_t index);
+SINTER_EXPORT void sinterFilterResultsDeinit(SinterFilterResults f);
+
+SINTER_EXPORT SinterError sinterFilterQueryLogicalOr(
+    SinterFilter f,
+    uint64_t* or_keys,
+    uint64_t or_keys_len,
+    SinterFilterResults* out
+);
+SINTER_EXPORT SinterError sinterFilterQueryLogicalAnd(
+    SinterFilter f,
+    uint64_t* and_keys,
+    uint64_t and_keys_len,
+    SinterFilterResults* out
+);
+SINTER_EXPORT SinterError sinterFilterQueryLogicalOrNumResults(
+    SinterFilter f,
+    uint64_t* or_keys,
+    uint64_t or_keys_len,
+    uint64_t* out_num_results
+);
+SINTER_EXPORT SinterError sinterFilterQueryLogicalAndNumResults(
+    SinterFilter f,
+    uint64_t* and_keys,
+    uint64_t and_keys_len,
+    uint64_t* out_num_results
+);
+
 SINTER_EXPORT char* sinterErrorName(SinterError err);
 
 #ifdef __cplusplus

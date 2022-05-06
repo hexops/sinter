@@ -33,7 +33,7 @@ const CCallbackIterator = struct {
             return null;
         }
         var v = iter.buf[0];
-        iter.remaining = iter.buf[1..written];
+        if (written > 1) iter.remaining = iter.buf[1..written];
         return v;
     }
 
@@ -41,6 +41,7 @@ const CCallbackIterator = struct {
         return iter.length;
     }
 
+    // TODO: call deinit on iterators
     pub inline fn deinit(iter: *CCallbackIterator) void {
         const allocator = std.heap.c_allocator;
         allocator.free(iter.result);
@@ -116,6 +117,103 @@ export fn sinterFilterWriteFile(c_filter: SinterFilter, file_path: [*:0]const u8
 
     const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
     filter.filter.writeFile(allocator, std.fs.cwd(), std.mem.span(file_path)) catch |err| return errorToCError(err);
+    return SinterError.None;
+}
+
+export fn sinterFilterContains(c_filter: SinterFilter, key: u64) bool {
+    const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
+    return filter.filter.contains(key);
+}
+
+export fn sinterFilterSizeInBytes(c_filter: SinterFilter) u64 {
+    const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
+    return filter.filter.sizeInBytes() + @sizeOf([100_000]u64);
+}
+
+const SinterFilterResults = *anyopaque;
+
+export fn sinterFilterResultsLen(c_results: SinterFilterResults) u64 {
+    const results = @ptrCast(*std.ArrayListUnmanaged([]const u8), @alignCast(@alignOf(std.ArrayListUnmanaged([]const u8)), c_results));
+    return results.items.len;
+}
+
+export fn sinterFilterResultsIndexLen(c_results: SinterFilterResults, index: u64) u64 {
+    const results = @ptrCast(*std.ArrayListUnmanaged([]const u8), @alignCast(@alignOf(std.ArrayListUnmanaged([]const u8)), c_results));
+    return results.items[index].len;
+}
+
+export fn sinterFilterResultsIndexGet(c_results: SinterFilterResults, index: u64) [*]const u8 {
+    const results = @ptrCast(*std.ArrayListUnmanaged([]const u8), @alignCast(@alignOf(std.ArrayListUnmanaged([]const u8)), c_results));
+    return results.items[index].ptr;
+}
+
+export fn sinterFilterResultsDeinit(c_results: SinterFilterResults) void {
+    const allocator = std.heap.c_allocator;
+    const results = @ptrCast(*std.ArrayListUnmanaged([]const u8), @alignCast(@alignOf(std.ArrayListUnmanaged([]const u8)), c_results));
+    results.deinit(allocator);
+}
+
+export fn sinterFilterQueryLogicalOr(c_filter: SinterFilter, or_keys: [*]u64, or_keys_len: u64, out_results: *SinterFilterResults) SinterError {
+    const allocator = std.heap.c_allocator;
+    const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
+
+    const ptr = allocator.create(std.ArrayListUnmanaged([]const u8)) catch return SinterError.OutOfMemory;
+    ptr.* = std.ArrayListUnmanaged([]const u8){};
+    errdefer ptr.*.deinit(allocator);
+    errdefer allocator.destroy(ptr);
+    out_results.* = ptr;
+
+    _ = filter.filter.queryLogicalOr(
+        allocator,
+        or_keys[0..or_keys_len],
+        *std.ArrayListUnmanaged([]const u8),
+        ptr,
+    ) catch |err| return errorToCError(err);
+    return SinterError.None;
+}
+
+export fn sinterFilterQueryLogicalAnd(c_filter: SinterFilter, and_keys: [*]u64, and_keys_len: u64, out_results: *SinterFilterResults) SinterError {
+    const allocator = std.heap.c_allocator;
+    const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
+
+    const ptr = allocator.create(std.ArrayListUnmanaged([]const u8)) catch return SinterError.OutOfMemory;
+    ptr.* = std.ArrayListUnmanaged([]const u8){};
+    errdefer ptr.*.deinit(allocator);
+    errdefer allocator.destroy(ptr);
+    out_results.* = ptr;
+
+    _ = filter.filter.queryLogicalAnd(
+        allocator,
+        and_keys[0..and_keys_len],
+        *std.ArrayListUnmanaged([]const u8),
+        ptr,
+    ) catch |err| return errorToCError(err);
+    return SinterError.None;
+}
+
+export fn sinterFilterQueryLogicalOrNumResults(c_filter: SinterFilter, or_keys: [*]u64, or_keys_len: u64, out_num_results: *u64) SinterError {
+    const allocator = std.heap.c_allocator;
+    const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
+
+    out_num_results.* = filter.filter.queryLogicalOr(
+        allocator,
+        or_keys[0..or_keys_len],
+        *std.ArrayListUnmanaged([]const u8),
+        null,
+    ) catch |err| return errorToCError(err);
+    return SinterError.None;
+}
+
+export fn sinterFilterQueryLogicalAndNumResults(c_filter: SinterFilter, and_keys: [*]u64, and_keys_len: u64, out_num_results: *u64) SinterError {
+    const allocator = std.heap.c_allocator;
+    const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
+
+    out_num_results.* = filter.filter.queryLogicalAnd(
+        allocator,
+        and_keys[0..and_keys_len],
+        *std.ArrayListUnmanaged([]const u8),
+        null,
+    ) catch |err| return errorToCError(err);
     return SinterError.None;
 }
 
