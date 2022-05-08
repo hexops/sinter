@@ -96,7 +96,7 @@ export fn sinterFilterIndex(c_filter: SinterFilter) SinterError {
     const filter = @ptrCast(*SinterFilterImpl, @alignCast(@alignOf(SinterFilterImpl), c_filter));
     filter.filter.index(allocator) catch |err| return switch (err) {
         error.OutOfMemory => SinterError.OutOfMemory,
-        error.KeysLikelyNotUnique => unreachable,
+        error.KeysLikelyNotUnique => @panic("keys likely not unique"),
     };
     return SinterError.None;
 }
