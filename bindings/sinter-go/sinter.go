@@ -77,11 +77,6 @@ type Iterator interface {
 	Len() uint64
 }
 
-type insert struct {
-	iter   Iterator
-	result []byte
-}
-
 func (f Filter) Insert(iter Iterator, result []byte) error {
 	// Retain memory so Go GC does not get rid of it.
 	inserts[f.ptr] = append(inserts[f.ptr], iter)
@@ -127,6 +122,7 @@ func (f Filter) WriteFile(file_path string) error {
 }
 
 func (f Filter) Contains(key uint64) bool {
+	//nolint:gosimple
 	return C.sinterFilterContains(f.ptr, C.uint64_t(key)) == true
 }
 
@@ -147,6 +143,7 @@ func (r FilterResults) Index(index int) []byte {
 		Data: uintptr(unsafe.Pointer(C.sinterFilterResultsIndexGet(r.ptr, C.uint64_t(index)))),
 		Len:  int(C.sinterFilterResultsIndexLen(r.ptr, C.uint64_t(index))),
 	}
+	//nolint:govet
 	ptr := (*string)(unsafe.Pointer(&header))
 	return []byte(*ptr)
 }
@@ -217,5 +214,4 @@ func goError(err C.SinterError) error {
 	default:
 		return IOError{Code: err, Msg: C.GoString(C.sinterErrorName(err))}
 	}
-
 }

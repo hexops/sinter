@@ -21,10 +21,14 @@ func TestFilter(t *testing.T) {
 	keysIter := &SliceIterator{Slice: slice}
 
 	for r := 0; r < num_results; r++ {
-		filter.Insert(keysIter, []byte("Hello world!"))
+		if err := filter.Insert(keysIter, []byte("Hello world!")); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	filter.Index()
+	if err := filter.Index(); err != nil {
+		t.Fatal(err)
+	}
 
 	assertEqual := func(a, b any) {
 		t.Helper()
@@ -85,5 +89,4 @@ func TestFilter(t *testing.T) {
 		}
 		assertEqual(numResults, uint64(200))
 	}
-
 }
