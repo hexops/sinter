@@ -175,28 +175,38 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
         /// Iterates every key in a filter.
         const AllKeysIter = struct {
             filter: *Self,
-            inner: usize = 0,
-            inner_layer: usize = 0,
+            mid_layer_index: usize = 0,
+            inner_layer_index: usize = 0,
             iter: ?Iterator = null,
 
             pub inline fn next(iter: *@This()) ?u64 {
                 if (iter.iter == null) {
-                    if (iter.filter.mid_layer[iter.inner].inner_layers.len == 0) return null;
-                    iter.iter = iter.filter.mid_layer[iter.inner].inner_layers.get(0).keys_iter.?;
+                    if (iter.filter.mid_layer[iter.mid_layer_index].inner_layers.len == 0) return null;
+                    iter.iter = iter.filter.mid_layer[iter.mid_layer_index].inner_layers.get(0).keys_iter.?;
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
-                    if (iter.inner_layer == iter.filter.mid_layer[iter.inner].inner_layers.len - 1) {
-                        if (iter.inner == iter.filter.mid_layer.len - 1) return null; // no further inner layer's
+                    if (iter.inner_layer_index+1 == iter.filter.mid_layer[iter.mid_layer_index].inner_layers.len) {
+                        if (iter.mid_layer_index+1 == iter.filter.mid_layer.len) {
+                            iter.mid_layer_index = 0;
+                            iter.inner_layer_index = 0;
+                            iter.iter = null;
+                            return null; // no further inner layers
+                        }
                         // Next inner layer.
-                        iter.inner += 1;
-                        iter.inner_layer = 0;
-                        if (iter.filter.mid_layer[iter.inner].inner_layers.len == 0) return null;
-                        iter.iter = iter.filter.mid_layer[iter.inner].inner_layers.get(iter.inner_layer).keys_iter.?;
+                        iter.mid_layer_index += 1;
+                        iter.inner_layer_index = 0;
+                        if (iter.filter.mid_layer[iter.mid_layer_index].inner_layers.len == 0) {
+                            iter.mid_layer_index = 0;
+                            iter.inner_layer_index = 0;
+                            iter.iter = null;
+                            return null;
+                        }
+                        iter.iter = iter.filter.mid_layer[iter.mid_layer_index].inner_layers.get(iter.inner_layer_index).keys_iter.?;
                         final = iter.iter.?.next();
                     } else {
-                        iter.inner_layer += 1;
-                        iter.iter = iter.filter.mid_layer[iter.inner].inner_layers.get(iter.inner_layer).keys_iter.?;
+                        iter.inner_layer_index += 1;
+                        iter.iter = iter.filter.mid_layer[iter.mid_layer_index].inner_layers.get(iter.inner_layer_index).keys_iter.?;
                         final = iter.iter.?.next();
                     }
                 }
@@ -208,25 +218,27 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             }
         };
 
-        /// Iterates every key in inner layer / a single division of mid_layer.
-        const InnerIterator = struct {
+        /// Iterates every key in a single mid layer.
+        const MidLayerIterator = struct {
             filter: *Self,
-            inner: usize,
-            inner_layer: usize = 0,
+            mid_layer_index: usize,
+            inner_layer_index: usize = 0,
             iter: ?Iterator = null,
 
-            pub inline fn next(iter: *@This()) ?u64 {
+            pub fn next(iter: *@This()) ?u64 {
                 if (iter.iter == null) {
-                    if (iter.filter.mid_layer[iter.inner].inner_layers.len == 0) return null;
-                    iter.iter = iter.filter.mid_layer[iter.inner].inner_layers.get(0).keys_iter.?;
+                    if (iter.filter.mid_layer[iter.mid_layer_index].inner_layers.len == 0) return null;
+                    iter.iter = iter.filter.mid_layer[iter.mid_layer_index].inner_layers.get(0).keys_iter.?;
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
-                    if (iter.inner_layer == iter.filter.mid_layer[iter.inner].inner_layers.len - 1) {
+                    if (iter.inner_layer_index+1 == iter.filter.mid_layer[iter.mid_layer_index].inner_layers.len) {
+                        iter.inner_layer_index = 0;
+                        iter.iter = null;
                         return null;
                     } else {
-                        iter.inner_layer += 1;
-                        iter.iter = iter.filter.mid_layer[iter.inner].inner_layers.get(iter.inner_layer).keys_iter.?;
+                        iter.inner_layer_index += 1;
+                        iter.iter = iter.filter.mid_layer[iter.mid_layer_index].inner_layers.get(iter.inner_layer_index).keys_iter.?;
                         final = iter.iter.?.next();
                     }
                 }
@@ -234,7 +246,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             }
 
             pub inline fn len(iter: @This()) usize {
-                return iter.filter.keys;
+                return iter.filter.mid_layer[iter.mid_layer_index].keys;
             }
         };
 
@@ -247,21 +259,21 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             filter.outer_layer = try BinaryFuseFilter.init(allocator, filter.keys);
             try filter.outer_layer.?.populateIter(allocator, &all_keys_iter);
 
-            // Populate each inner layer filter, with their division of keys.
-            for (filter.mid_layer) |*inner, inner_index| {
-                var inner_iter = InnerIterator{ .filter = filter, .inner = inner_index };
-                inner.filter = try BinaryFuseFilter.init(allocator, inner.keys);
-                try inner.filter.?.populateIter(allocator, &inner_iter);
+            // Populate each mid layer filter, with their division of keys.
+            for (filter.mid_layer) |*mid_layer, mid_layer_index| {
+                var mid_layer_iter = MidLayerIterator{ .filter = filter, .mid_layer_index = mid_layer_index };
+                mid_layer.filter = try BinaryFuseFilter.init(allocator, mid_layer.keys);
+                try mid_layer.filter.?.populateIter(allocator, &mid_layer_iter);
             }
 
             // Populate each inner_layer filter.
-            for (filter.mid_layer) |*inner| {
+            for (filter.mid_layer) |*mid_layer| {
                 var i: usize = 0;
-                while (i < inner.inner_layers.len) : (i += 1) {
-                    var inner_layer = inner.inner_layers.get(i);
+                while (i < mid_layer.inner_layers.len) : (i += 1) {
+                    var inner_layer = mid_layer.inner_layers.get(i);
                     inner_layer.filter = try BinaryFuseFilter.init(allocator, inner_layer.keys);
                     try inner_layer.filter.?.populateIter(allocator, inner_layer.keys_iter.?);
-                    inner.inner_layers.set(i, inner_layer);
+                    mid_layer.inner_layers.set(i, inner_layer);
                 }
             }
         }
