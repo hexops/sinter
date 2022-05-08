@@ -186,8 +186,8 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
-                    if (iter.inner_layer_index+1 == iter.filter.mid_layer[iter.mid_layer_index].inner_layers.len) {
-                        if (iter.mid_layer_index+1 == iter.filter.mid_layer.len) {
+                    if (iter.inner_layer_index + 1 == iter.filter.mid_layer[iter.mid_layer_index].inner_layers.len) {
+                        if (iter.mid_layer_index + 1 == iter.filter.mid_layer.len) {
                             iter.mid_layer_index = 0;
                             iter.inner_layer_index = 0;
                             iter.iter = null;
@@ -232,7 +232,7 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 }
                 var final = iter.iter.?.next();
                 while (final == null) {
-                    if (iter.inner_layer_index+1 == iter.filter.mid_layer[iter.mid_layer_index].inner_layers.len) {
+                    if (iter.inner_layer_index + 1 == iter.filter.mid_layer[iter.mid_layer_index].inner_layers.len) {
                         iter.inner_layer_index = 0;
                         iter.iter = null;
                         return null;
@@ -263,7 +263,8 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             for (filter.mid_layer) |*mid_layer, mid_layer_index| {
                 var mid_layer_iter = MidLayerIterator{ .filter = filter, .mid_layer_index = mid_layer_index };
                 mid_layer.filter = try BinaryFuseFilter.init(allocator, mid_layer.keys);
-                try mid_layer.filter.?.populateIter(allocator, &mid_layer_iter);
+                // try mid_layer.filter.?.populateIter(allocator, &mid_layer_iter);
+                try populateIterUnique(allocator, &mid_layer.filter.?, &mid_layer_iter);
             }
 
             // Populate each inner_layer filter.
@@ -272,7 +273,8 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 while (i < mid_layer.inner_layers.len) : (i += 1) {
                     var inner_layer = mid_layer.inner_layers.get(i);
                     inner_layer.filter = try BinaryFuseFilter.init(allocator, inner_layer.keys);
-                    try inner_layer.filter.?.populateIter(allocator, inner_layer.keys_iter.?);
+                    // try inner_layer.filter.?.populateIter(allocator, inner_layer.keys_iter.?);
+                    try populateIterUnique(allocator, &inner_layer.filter.?, inner_layer.keys_iter.?);
                     mid_layer.inner_layers.set(i, inner_layer);
                 }
             }
@@ -564,6 +566,24 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
                 .segment_count_length = segment_count_length,
                 .fingerprints = fingerprints,
             };
+        }
+
+        // This works around an issue in binary fuse filters which is hopefully fixed upstream soon:
+        // https://github.com/FastFilter/xorfilter/issues/30
+        //
+        // It works around the issue by collecting all keys, making them a unique set, and then populating
+        // the filter with that. This defeats the entire purpose of iterator-based binary fuse filters, of
+        // course (less memory usage.)
+        fn populateIterUnique(allocator: Allocator, filter: *BinaryFuseFilter, iter: anytype) !void {
+            const keys = try allocator.alloc(u64, iter.len());
+            defer allocator.free(keys);
+            var i: usize = 0;
+            while (iter.next()) |key| {
+                keys[i] = key;
+                i += 1;
+            }
+            const unique_keys = fastfilter.AutoUnique(u64, void)({}, keys);
+            try filter.populate(allocator, unique_keys);
         }
     };
 }
