@@ -257,7 +257,8 @@ pub fn Filter(comptime options: Options, comptime Result: type, comptime Iterato
             // Populate outer layer with all keys.
             var all_keys_iter = AllKeysIter{ .filter = filter };
             filter.outer_layer = try BinaryFuseFilter.init(allocator, filter.keys);
-            try filter.outer_layer.?.populateIter(allocator, &all_keys_iter);
+            // try filter.outer_layer.?.populateIter(allocator, &all_keys_iter);
+            try populateIterUnique(allocator, &filter.outer_layer.?, &all_keys_iter);
 
             // Populate each mid layer filter, with their division of keys.
             for (filter.mid_layer) |*mid_layer, mid_layer_index| {
