@@ -6,7 +6,11 @@ package sinter
 #include <sinter.h>
 #include <stdlib.h>
 
-uint64_t sinterGoIteratorCallback(SinterFilter f, uint64_t* out_write_max_100k, void* userdata);
+// Declared for exact compatability with CGO GoUint64 type, otherwise we'd have conflicting
+// signatures if we used uint64_t despite being the same in the end.
+typedef unsigned long long go_uint64;
+
+go_uint64 sinterGoIteratorCallback(SinterFilter f, go_uint64* out_write_max_100k, void* userdata);
 */
 import "C"
 
