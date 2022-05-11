@@ -4,6 +4,7 @@ const fastfilter = @import("libs/fastfilter/build.zig");
 pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
     const lib = b.addStaticLibrary("sinter", "src/libsinter.zig");
+    lib.bundle_compiler_rt = true;
     lib.addPackage(fastfilter.pkg);
     lib.setBuildMode(mode);
     lib.install();
