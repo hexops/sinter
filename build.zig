@@ -10,6 +10,7 @@ pub fn build(b: *std.build.Builder) void {
     lib.addPackage(fastfilter.pkg);
     lib.setBuildMode(mode);
     lib.setTarget(target);
+    lib.linkLibC();
     lib.install();
 
     var main_tests = b.addTest("src/main.zig");
