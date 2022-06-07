@@ -36,11 +36,13 @@ pub fn build(b: *std.build.Builder) void {
 
     const benchmark_filter_run_step = b.step("run-benchmark-filter", "Run benchmark_filter");
     benchmark_filter_run_step.dependOn(&benchmark_filter_run_cmd.step);
+
+    _ = pkg;
 }
 
 pub const pkg = std.build.Pkg{
     .name = "sinter",
-    .path = .{ .path = thisDir() ++ "/src/main.zig" },
+    .source = .{ .path = thisDir() ++ "/src/main.zig" },
     .dependencies = &.{fastfilter.pkg},
 };
 
